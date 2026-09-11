@@ -892,16 +892,20 @@ final class FireworksEngine {
             for _ in 0..<count {
                 var st = Star()
                 st.ux = r.unit()
-                st.uy = r.d(0, 0.76)
+                st.uy = r.d(0, 0.88)
                 st.parallax = parallax
                 st.size = r.d(sizeLo, sizeHi)
                 st.bright = r.d(brightLo, brightHi)
-                st.rate = r.d(0.4, 2.8)
+                // A slow sine each, 7 to 30 seconds a cycle, all out of step.
+                st.rate = r.d(0.21, 0.95)
                 st.phase = r.d(0, 6.283)
                 // Sparkles are rarer, and live mostly on the near layers.
                 st.glint = r.chance(0.07 + 0.20 * f)
                 if st.glint { st.size *= 1.15; st.bright = min(1, st.bright * 1.25) }
                 st.tint = r.chance(0.62) ? 0 : (r.chance(0.5) ? 1 : 2)
+                // Haze thickens toward the skyline, so the field fades out
+                // down there instead of stopping at a hard edge.
+                st.bright *= 1 - 0.80 * clamp01((st.uy - 0.58) / 0.30)
                 stars.append(st)
             }
         }
@@ -1808,9 +1812,9 @@ final class FireworksEngine {
             let sy = s.uy * h - camY * s.parallax
 
             let osc = sin(time * s.rate + s.phase)
-            // Sparkles wink hard; plain dots just breathe.
-            let tw = s.glint ? (0.22 + 0.78 * pow(max(0, osc), 1.7))
-                             : (0.58 + 0.42 * osc)
+            // Sparkles wink most of the way out; plain dots breathe.
+            let tw = s.glint ? (0.16 + 0.84 * pow(max(0, osc), 1.4))
+                             : (0.52 + 0.48 * osc)
             let a = s.bright * tw
             if a < 0.02 { continue }
 
