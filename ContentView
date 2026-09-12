@@ -760,6 +760,8 @@ struct Particle {
     var hue2: Double = -1      // colour it burns through to
     var hueShiftAt: Double = -1
     var jitter: Double = 0
+    var shed: Double = 0       // sparks per second dropped along the path
+    var shedAccum: Double = 0
     var trail: UInt8 = 0
     var flags: PFlags = []
 }
@@ -832,6 +834,7 @@ enum ShellType: UInt8 {
     case multiBreak     // splits into several secondary shells
     case comet          // heavy horsetail
     case cascade        // stars that break, and break, and break again
+    case brocade        // long gold rays that glitter the whole way out
 }
 
 struct Palette {
@@ -911,6 +914,7 @@ struct ShellPlan {
     var trail: Bool = false
     var ember: Bool = false
     var crackle: Bool = false
+    var shedRate: Double = 0     // glittering trail, sparks per second per star
     var colorShift: Bool = false
     var shiftHue: Double = 0
     var shiftAt: Double = 0.45   // fraction of life
@@ -1276,7 +1280,8 @@ final class FireworksEngine {
             (.spiral,         0.22),
             (.multiBreak,     0.08 + 0.40 * e),
             (.comet,          0.26),
-            (.cascade,        0.26 + 0.12 * e)
+            (.cascade,        0.26 + 0.12 * e),
+            (.brocade,        0.85)
         ]
         var total = 0.0
         for item in table { total += max(0, item.1) }
@@ -1375,6 +1380,23 @@ final class FireworksEngine {
             p.count = Int(Double(p.count) * 0.8)
             p.radius *= 0.85
             p.life *= 1.4
+        case .brocade:
+            // The classic glittering gold shell: long straight rays that
+            // shed sparks the whole way out and hang there burning.
+            p.palette = Palette(h0: 0.095, h1: 0.072, h2: 0.115, n: 3,
+                                jitter: 0.016,
+                                silverMix: rng.chance(0.40) ? 0.22 : 0.0,
+                                rainbow: false)
+            p.count = Int(Double(p.count) * 0.42)
+            p.life = rng.d(2.7, 3.7)
+            p.radius *= 1.05
+            p.trail = true
+            p.ember = true
+            p.glitter = false
+            p.twinkle = rng.chance(0.30)
+            p.crackle = false
+            p.pistil = rng.chance(0.32)
+            p.shedRate = rng.d(26, 42)
         case .cascade:
             // Each star ends up as 27, so start with very few.
             p.count = Int(Double(p.count) * 0.13)
@@ -1383,6 +1405,16 @@ final class FireworksEngine {
             p.trail = true
             p.ember = false
             p.pistil = false
+        }
+
+        // Any other long-burning shell may glitter too. Sparks are not free,
+        // so a shell that sheds carries fewer stars.
+        if p.shedRate <= 0 && rng.chance(0.32)
+            && (p.type == .chrysanthemum || p.type == .willow
+                || p.type == .palm || p.type == .comet) {
+            p.shedRate = rng.d(15, 27)
+            p.count = Int(Double(p.count) * 0.70)
+            p.ember = true
         }
 
         // Colour-changing stars. Not for figures, which need one colour to
@@ -1455,7 +1487,8 @@ final class FireworksEngine {
                            buoy: Double = 0.30,
                            splitsLeft: UInt8 = 0, splitGap: Double = 0.45,
                            splitFan: UInt8 = 4,
-                           hue2: Double = -1, hueShiftAt: Double = -1) {
+                           hue2: Double = -1, hueShiftAt: Double = -1,
+                           shed: Double = 0) {
         guard particles.count < maxParticles else { return }
         var p = Particle()
         p.x = x; p.y = y; p.vx = vx; p.vy = vy
@@ -1466,6 +1499,7 @@ final class FireworksEngine {
         p.splitAge = splitAge; p.splitSpeed = splitSpeed; p.splitHue = splitHue
         p.splitsLeft = splitsLeft; p.splitGap = splitGap; p.splitFan = splitFan
         p.hue2 = hue2; p.hueShiftAt = hueShiftAt
+        p.shed = shed
         p.jitter = jitter
         p.phase = rng.d(0, 6.283)
         p.rate = rng.d(9, 27)
@@ -1497,7 +1531,8 @@ final class FireworksEngine {
                           jitter: Double = 0, brightScale: Double = 1, windK: Double = 1,
                           buoy: Double = 0.30,
                           splitsLeft: UInt8 = 0, splitGap: Double = 0.45,
-                          splitFan: UInt8 = 4) {
+                          splitFan: UInt8 = 4,
+                          shed: Double = -1) {
         let silver = plan.palette.isSilver(&rng)
         var flags = starFlags(plan, silver: silver)
         flags.formUnion(extra)
@@ -1527,7 +1562,8 @@ final class FireworksEngine {
                   splitAge: splitAge, splitSpeed: splitSpeed, splitHue: splitHue,
                   jitter: jitter, buoy: buoy,
                   splitsLeft: splitsLeft, splitGap: splitGap, splitFan: splitFan,
-                  hue2: h2, hueShiftAt: shiftAt)
+                  hue2: h2, hueShiftAt: shiftAt,
+                  shed: shed < 0 ? plan.shedRate : shed)
     }
 
     @inline(__always) private func randomDir(_ r: inout FastRNG) -> V3 {
@@ -1744,6 +1780,19 @@ final class FireworksEngine {
                 }
             }
 
+        case .brocade:
+            // Low drag so the rays run long and straight, and a slow decay so
+            // the head is still burning when it gets there.
+            let brocV = burstSpeed(plan.radius, 0.62, 1.55)
+            for _ in 0..<plan.count {
+                let d = randomDir(&rng)
+                emitStar(plan, x: x, y: y, bvx: vx, bvy: vy, dir: d,
+                         speed: brocV * rng.d(0.92, 1.05),
+                         life: plan.life, size: baseSize * 1.15,
+                         drag: 0.62, grav: 1.02, decay: 0.95, trail: 1,
+                         buoy: 0.22)
+            }
+
         case .cascade:
             let cascV = burstSpeed(plan.radius, 0.95, 1.00)
             let gap = rng.d(0.40, 0.60)
@@ -1789,7 +1838,8 @@ final class FireworksEngine {
                 emitStar(inner, x: x, y: y, bvx: vx, bvy: vy, dir: d,
                          speed: pistilV * rng.d(0.85, 1.05),
                          life: plan.life * 0.8, size: baseSize * 0.95,
-                         drag: 1.10, grav: 1.0, decay: 1.8, trail: 0)
+                         drag: 1.10, grav: 1.0, decay: 1.8, trail: 0,
+                         shed: 0)
             }
         }
 
@@ -1804,7 +1854,8 @@ final class FireworksEngine {
                          life: rng.d(0.35, 0.85), size: baseSize * 0.8,
                          drag: 2.40, grav: 0.8, decay: 1.0, trail: 0,
                          extra: [.glitter, .silver, .noHalo],
-                         jitter: unitH * 0.5, brightScale: 1.3, buoy: 0.48)
+                         jitter: unitH * 0.5, brightScale: 1.3, buoy: 0.48,
+                         shed: 0)
             }
         }
     }
@@ -1891,6 +1942,11 @@ final class FireworksEngine {
         let g = gravity
         let w = wind
         let dragK = dragUnit
+        // Sparks are not free. As the field fills up, shedding thins out
+        // rather than blowing the budget and starving the shells themselves.
+        let load = Double(particles.count) / Double(max(1, maxParticles))
+        let shedScale = quality * max(0, 1 - load * load * 1.15)
+        let spark = unitH * 0.0022
         var newborn: [Particle] = []
         var write = 0
 
@@ -1966,6 +2022,41 @@ final class FireworksEngine {
 
                 p.x += p.vx * dt
                 p.y += p.vy * dt
+
+                // A glittering star drops burning grains the whole way out.
+                // They hang where they fall, so the path itself draws the long
+                // sparkling ray — the trail is made of debris, not of echoes.
+                if p.shed > 0 && shedScale > 0.02 && p.age < p.life * 0.92 {
+                    p.shedAccum += p.shed * shedScale * dt
+                    while p.shedAccum >= 1 {
+                        p.shedAccum -= 1
+                        var k = Particle()
+                        k.x = p.x + rng.d(-1, 1) * spark
+                        k.y = p.y + rng.d(-1, 1) * spark
+                        k.vx = p.vx * 0.10 + rng.d(-1, 1) * spark * 7
+                        k.vy = p.vy * 0.10 + rng.d(-1, 1) * spark * 7
+                        k.z = p.z
+                        k.fs = p.fs * 0.85
+                        k.life = rng.d(0.65, 1.20)
+                        k.size = p.size * 0.46
+                        k.hue = 0.085 + rng.d(-0.020, 0.020)
+                        k.bright = rng.d(0.55, 1.05)
+                        k.drag = 3.4
+                        k.grav = 0.85
+                        k.buoy = 0.55
+                        k.windK = 1.3
+                        k.decay = 1.45
+                        k.phase = rng.d(0, 6.283)
+                        k.rate = rng.d(18, 44)
+                        // A few grains strobe hard; the rest just burn out.
+                        if rng.unit() < 0.30 {
+                            k.flags = [.glitter, .silver]
+                        } else {
+                            k.flags = [.ember]
+                        }
+                        newborn.append(k)
+                    }
+                }
 
                 buf[write] = p
                 write += 1
@@ -2230,7 +2321,7 @@ final class FireworksEngine {
             // White core — a hot point, not a headlight.
             let coreA = pow(1 - u, 3.4) * f.power
             if coreA > 0.01 {
-                let cr = R * (0.075 + u * 0.10)
+                let cr = R * (0.030 + u * 0.045)
                 ctx.opacity = min(1, coreA)
                 ctx.draw(deck.flash, in: CGRect(x: sx - cr, y: sy - cr, width: cr * 2, height: cr * 2))
             }
