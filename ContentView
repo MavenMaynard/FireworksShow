@@ -798,6 +798,7 @@ struct Flash {
     var hue: Double = 0.1
     var silver: Bool = false
     var power: Double = 1
+    var spin: Double = 0        // rotation of the sparkle rosette
 }
 
 struct Star {
@@ -1546,7 +1547,8 @@ final class FireworksEngine {
                              radius: plan.radius * 0.55,
                              hue: plan.palette.hue(&rng),
                              silver: plan.type == .salute,
-                             power: plan.power))
+                             power: plan.power,
+                             spin: rng.d(0, 6.283)))
         exposure = min(1.6, exposure + plan.power * 0.22 * atmos)
 
         // Heard well after it is seen.
@@ -2225,20 +2227,28 @@ final class FireworksEngine {
                 ctx.draw(tint, in: CGRect(x: sx - br, y: sy - br, width: br * 2, height: br * 2))
             }
 
-            // White core.
+            // White core — a hot point, not a headlight.
             let coreA = pow(1 - u, 3.4) * f.power
             if coreA > 0.01 {
-                let cr = R * (0.30 + u * 0.40)
+                let cr = R * (0.075 + u * 0.10)
                 ctx.opacity = min(1, coreA)
                 ctx.draw(deck.flash, in: CGRect(x: sx - cr, y: sy - cr, width: cr * 2, height: cr * 2))
             }
 
-            // Flare spikes — first frames only.
-            let flareA = pow(1 - u, 5.5) * f.power * 0.95
+            // Five small sparkles thrown out radially, rather than one big
+            // lens flare parked on the middle.
+            let flareA = pow(1 - u, 5.0) * f.power * 0.42
             if flareA > 0.02 {
-                let fr = R * (1.7 + u * 2.2)
+                let fr = R * (0.40 + u * 0.52)
+                let ring = R * (0.52 + u * 1.05)
                 ctx.opacity = min(1, flareA)
-                ctx.draw(deck.glint, in: CGRect(x: sx - fr, y: sy - fr, width: fr * 2, height: fr * 2))
+                for k in 0..<5 {
+                    let a = f.spin + Double(k) * 1.2566371      // 2pi / 5
+                    let px = sx + cos(a) * ring
+                    let py = sy + sin(a) * ring
+                    ctx.draw(deck.glint, in: CGRect(x: px - fr, y: py - fr,
+                                                    width: fr * 2, height: fr * 2))
+                }
             }
 
             // Shockwave.
