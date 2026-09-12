@@ -125,6 +125,7 @@ struct SkyView: View {
                 CoreSprite(color: Sprites.starWarm).tag(Sprites.starWarmID)
                 CoreSprite(color: Sprites.starCool).tag(Sprites.starCoolID)
                 GlintSprite().tag(Sprites.glintID)
+                ShockSprite().tag(Sprites.shockID)
             }
         }
     }
@@ -152,6 +153,7 @@ enum Sprites {
     static let starWarmID = 304
     static let starCoolID = 305
     static let glintID = 306
+    static let shockID = 307
 
     static let starWarm = Color(red: 1.00, green: 0.84, blue: 0.66)
     static let starCool = Color(red: 0.68, green: 0.81, blue: 1.00)
@@ -269,6 +271,27 @@ struct SmokeSprite: View {
     }
 }
 
+/// The shockwave: a bright annulus that expands out of the break.
+struct ShockSprite: View {
+    var body: some View {
+        Circle()
+            .fill(
+                RadialGradient(
+                    stops: [
+                        .init(color: Color.white.opacity(0.00), location: 0.00),
+                        .init(color: Color.white.opacity(0.04), location: 0.58),
+                        .init(color: Color.white.opacity(0.50), location: 0.80),
+                        .init(color: Color.white.opacity(0.95), location: 0.90),
+                        .init(color: Color.white.opacity(0.28), location: 0.96),
+                        .init(color: Color.clear, location: 1.00)
+                    ],
+                    center: .center, startRadius: 0, endRadius: 32
+                )
+            )
+            .frame(width: 64, height: 64)
+    }
+}
+
 /// The break flash — huge, soft, blown out.
 struct FlashSprite: View {
     var body: some View {
@@ -300,6 +323,7 @@ struct ResolvedDeck {
     var starWarm: GraphicsContext.ResolvedSymbol
     var starCool: GraphicsContext.ResolvedSymbol
     var glint: GraphicsContext.ResolvedSymbol
+    var shock: GraphicsContext.ResolvedSymbol
 
     init?(_ ctx: GraphicsContext) {
         guard let sh = ctx.resolveSymbol(id: Sprites.silverHaloID),
@@ -308,9 +332,10 @@ struct ResolvedDeck {
               let fl = ctx.resolveSymbol(id: Sprites.flashID),
               let sw = ctx.resolveSymbol(id: Sprites.starWarmID),
               let sl = ctx.resolveSymbol(id: Sprites.starCoolID),
-              let gl = ctx.resolveSymbol(id: Sprites.glintID) else { return nil }
+              let gl = ctx.resolveSymbol(id: Sprites.glintID),
+              let sk = ctx.resolveSymbol(id: Sprites.shockID) else { return nil }
         silverHalo = sh; silverCore = sc; smoke = sm; flash = fl
-        starWarm = sw; starCool = sl; glint = gl
+        starWarm = sw; starCool = sl; glint = gl; shock = sk
         halo.reserveCapacity(Sprites.hueCount)
         core.reserveCapacity(Sprites.hueCount)
         for i in 0..<Sprites.hueCount {
@@ -548,6 +573,152 @@ struct V3 {
 }
 
 // =====================================================================
+// MARK: - Figures
+//
+// A pattern shell is just a list of points that become star directions.
+// Parts can be flagged as detail (eyes, mouth, whiskers) so they burn in a
+// second colour. Coordinates run about -1...1 with y pointing down, the
+// same way the screen does.
+// =====================================================================
+
+struct Outline {
+    var pts: [(Double, Double)] = []
+    var detail: [Bool] = []
+
+    mutating func reserve(_ n: Int) {
+        pts.reserveCapacity(n + 24)
+        detail.reserveCapacity(n + 24)
+    }
+
+    mutating func add(_ x: Double, _ y: Double, _ d: Bool) {
+        pts.append((x, y))
+        detail.append(d)
+    }
+
+    mutating func arc(_ cx: Double, _ cy: Double, _ r: Double,
+                      _ a0: Double, _ a1: Double, _ n: Int, _ d: Bool = false) {
+        let c = max(2, n)
+        for i in 0..<c {
+            let a = a0 + (a1 - a0) * Double(i) / Double(c)
+            add(cx + cos(a) * r, cy + sin(a) * r, d)
+        }
+    }
+
+    mutating func ring(_ cx: Double, _ cy: Double, _ r: Double, _ n: Int, _ d: Bool = false) {
+        arc(cx, cy, r, 0, 6.2831853, n, d)
+    }
+
+    mutating func line(_ x0: Double, _ y0: Double, _ x1: Double, _ y1: Double,
+                       _ n: Int, _ d: Bool = false) {
+        let c = max(2, n)
+        for i in 0..<c {
+            let f = Double(i) / Double(c - 1)
+            add(x0 + (x1 - x0) * f, y0 + (y1 - y0) * f, d)
+        }
+    }
+
+    static func part(_ n: Int, _ f: Double) -> Int { max(2, Int(Double(n) * f)) }
+
+    // MARK: the figures
+
+    static func heart(_ o: inout Outline, _ n: Int) {
+        let c = max(12, n)
+        for i in 0..<c {
+            let t = Double(i) / Double(c) * 6.2831853
+            let s = sin(t)
+            let px = 16 * s * s * s
+            let py = 13 * cos(t) - 5 * cos(2 * t) - 2 * cos(3 * t) - cos(4 * t)
+            o.add(px / 17.0, -py / 17.0, false)
+        }
+    }
+
+    static func star5(_ o: inout Outline, _ n: Int) {
+        var v: [(Double, Double)] = []
+        for i in 0..<10 {
+            let a = -Double.pi / 2 + Double(i) * Double.pi / 5
+            let r = (i % 2 == 0) ? 1.0 : 0.42
+            v.append((r * cos(a), r * sin(a)))
+        }
+        let c = max(12, n)
+        for i in 0..<c {
+            let u = Double(i) / Double(c) * 10
+            let e = Int(u) % 10
+            let f = u - floor(u)
+            let a = v[e], b = v[(e + 1) % 10]
+            o.add(a.0 + (b.0 - a.0) * f, a.1 + (b.1 - a.1) * f, false)
+        }
+    }
+
+    static func flower(_ o: inout Outline, _ n: Int, petals: Int) {
+        let p = Double(petals)
+        let c = max(12, n)
+        for i in 0..<c {
+            let t = Double(i) / Double(c) * 6.2831853
+            let r = 0.55 + 0.45 * cos(p * t)
+            o.add(r * cos(t), r * sin(t), false)
+        }
+    }
+
+    static func cat(_ o: inout Outline, _ n: Int) {
+        o.ring(0, 0.06, 0.70, part(n, 0.40))
+        let ear = part(n, 0.055)
+        o.line(-0.62, -0.32, -0.50, -0.98, ear)
+        o.line(-0.50, -0.98, -0.14, -0.62, ear)
+        o.line( 0.62, -0.32,  0.50, -0.98, ear)
+        o.line( 0.50, -0.98,  0.14, -0.62, ear)
+        o.ring(-0.28, -0.06, 0.085, part(n, 0.035), true)
+        o.ring( 0.28, -0.06, 0.085, part(n, 0.035), true)
+        o.ring( 0.00,  0.16, 0.065, part(n, 0.030), true)
+        let w = part(n, 0.035)
+        o.line(-0.18, 0.20, -0.92, 0.06, w, true)
+        o.line(-0.18, 0.24, -0.92, 0.30, w, true)
+        o.line(-0.18, 0.28, -0.88, 0.52, w, true)
+        o.line( 0.18, 0.20,  0.92, 0.06, w, true)
+        o.line( 0.18, 0.24,  0.92, 0.30, w, true)
+        o.line( 0.18, 0.28,  0.88, 0.52, w, true)
+    }
+
+    static func smiley(_ o: inout Outline, _ n: Int) {
+        o.ring(0, 0, 0.88, part(n, 0.52))
+        o.ring(-0.32, -0.26, 0.10, part(n, 0.06), true)
+        o.ring( 0.32, -0.26, 0.10, part(n, 0.06), true)
+        // y points down, so this arc sweeps under the face: a smile.
+        o.arc(0, -0.06, 0.55, 0.42, 2.72, part(n, 0.30), true)
+    }
+
+    /// Four lobes and a shaft. The lobe arcs open toward the middle so they
+    /// draw only the outside of each end, leaving the shaft clean.
+    static func bone(_ o: inout Outline, _ n: Int) {
+        let lobe = part(n, 0.135)
+        let p = Double.pi
+        o.arc(-0.56, -0.30, 0.34, 0.62 * p, 1.94 * p, lobe)
+        o.arc(-0.56,  0.30, 0.34, 0.06 * p, 1.38 * p, lobe)
+        o.arc( 0.56, -0.30, 0.34, 1.06 * p, 2.38 * p, lobe)
+        o.arc( 0.56,  0.30, 0.34, -0.38 * p, 0.94 * p, lobe)
+        let bar = part(n, 0.19)
+        o.line(-0.56, -0.14, 0.56, -0.14, bar)
+        o.line(-0.56,  0.14, 0.56,  0.14, bar)
+    }
+
+    static func peace(_ o: inout Outline, _ n: Int) {
+        o.ring(0, 0, 0.92, part(n, 0.46))
+        o.line(0, -0.92, 0, 0.92, part(n, 0.20))
+        o.line(0,  0.04, -0.64, 0.68, part(n, 0.17))
+        o.line(0,  0.04,  0.64, 0.68, part(n, 0.17))
+    }
+
+    /// Stick figure, arms thrown up.
+    static func person(_ o: inout Outline, _ n: Int) {
+        o.ring(0, -0.68, 0.19, part(n, 0.16))
+        o.line(0, -0.49, 0,  0.22, part(n, 0.16))
+        o.line(0, -0.32, -0.60, -0.84, part(n, 0.14))
+        o.line(0, -0.32,  0.60, -0.84, part(n, 0.14))
+        o.line(0,  0.22, -0.46, 0.94, part(n, 0.20))
+        o.line(0,  0.22,  0.46, 0.94, part(n, 0.20))
+    }
+}
+
+// =====================================================================
 // MARK: - Simulation model
 // =====================================================================
 
@@ -583,6 +754,11 @@ struct Particle {
     var splitAge: Double = -1  // crossette break
     var splitSpeed: Double = 0
     var splitHue: Double = -1
+    var splitsLeft: UInt8 = 0  // further breaks after this one
+    var splitGap: Double = 0.45
+    var splitFan: UInt8 = 4
+    var hue2: Double = -1      // colour it burns through to
+    var hueShiftAt: Double = -1
     var jitter: Double = 0
     var trail: UInt8 = 0
     var flags: PFlags = []
@@ -654,6 +830,7 @@ enum ShellType: UInt8 {
     case spiral         // rotating arms
     case multiBreak     // splits into several secondary shells
     case comet          // heavy horsetail
+    case cascade        // stars that break, and break, and break again
 }
 
 struct Palette {
@@ -733,6 +910,9 @@ struct ShellPlan {
     var trail: Bool = false
     var ember: Bool = false
     var crackle: Bool = false
+    var colorShift: Bool = false
+    var shiftHue: Double = 0
+    var shiftAt: Double = 0.45   // fraction of life
     var power: Double = 1        // flash / exposure strength
     var generation: Int = 0      // multi-break depth
 }
@@ -842,7 +1022,8 @@ final class FireworksEngine {
         let dt = raw * (0.92 + clamp01(intensity) * 0.28)
         time += dt
 
-        wind = unitH * 0.05 * sin(time * 0.09) + unitH * 0.028 * sin(time * 0.037 + 1.7)
+        // Air speed, not a shove. Roughly 1 m/s of drift — a still night.
+        wind = unitH * 0.0026 * sin(time * 0.048) + unitH * 0.0013 * sin(time * 0.021 + 1.7)
 
         stepCamera(dt)
         stepSpawning()
@@ -884,15 +1065,17 @@ final class FireworksEngine {
         for l in 0..<layers {
             let f = Double(l) / Double(layers - 1)          // 0 = deepest, 1 = nearest
             let parallax = 0.015 + 0.235 * pow(f, 1.7)
-            let count = Int(112 - 76 * f)
-            let sizeLo = 0.95 + 1.05 * f                    // 1.9 px across at the back
-            let sizeHi = 1.55 + 2.10 * f                    // 7.3 px across at the front
-            let brightLo = 0.09 + 0.20 * f
-            let brightHi = 0.32 + 0.54 * f
+            let count = Int(215 - 160 * f)                  // deep layers are dense dust
+            let sizeLo = 0.70 + 1.10 * f                    // 1.4 px across at the back
+            let sizeHi = 1.15 + 2.35 * f                    // 7.0 px across at the front
+            let brightLo = 0.05 + 0.11 * f
+            let brightHi = 0.17 + 0.33 * f
             for _ in 0..<count {
                 var st = Star()
                 st.ux = r.unit()
-                st.uy = r.d(0, 0.88)
+                // Past both edges, so a vertical camera drift never exposes a
+                // bare band. There is no horizon here — the sky fills the frame.
+                st.uy = r.d(-0.05, 1.05)
                 st.parallax = parallax
                 st.size = r.d(sizeLo, sizeHi)
                 st.bright = r.d(brightLo, brightHi)
@@ -903,9 +1086,6 @@ final class FireworksEngine {
                 st.glint = r.chance(0.07 + 0.20 * f)
                 if st.glint { st.size *= 1.15; st.bright = min(1, st.bright * 1.25) }
                 st.tint = r.chance(0.62) ? 0 : (r.chance(0.5) ? 1 : 2)
-                // Haze thickens toward the skyline, so the field fades out
-                // down there instead of stopping at a hard edge.
-                st.bright *= 1 - 0.80 * clamp01((st.uy - 0.58) / 0.30)
                 stars.append(st)
             }
         }
@@ -964,11 +1144,11 @@ final class FireworksEngine {
         min(2.4, (250.0 / max(0.20, z)) / 343.0)
     }
     private func soundLevel(_ z: Double) -> Double {
-        0.20 + 0.85 * pow(clamp01(z / 1.65), 1.15)
+        0.45 + 0.55 * clamp01((z - 0.70) / 0.62)
     }
     /// Air eats the top end over distance: far shells are all thud, no crack.
     private func soundCutoff(_ z: Double) -> Double {
-        700 + 7200 * clamp01((z - 0.30) / 1.55)
+        1800 + 5200 * clamp01((z - 0.72) / 0.60)
     }
     private func soundPan(_ sx: Double) -> Double {
         max(-1, min(1, ((sx / max(1, unitW)) * 2 - 1) * 0.8))
@@ -976,7 +1156,7 @@ final class FireworksEngine {
 
     /// Distant shells are hazier and dimmer.
     @inline(__always) private func atmosphere(_ z: Double) -> Double {
-        0.46 + 0.56 * clamp01((z - 0.30) / 1.55)
+        0.80 + 0.24 * clamp01((z - 0.72) / 0.60)
     }
 
     // -----------------------------------------------------------------
@@ -1006,11 +1186,14 @@ final class FireworksEngine {
 
     /// Depth pick. High energy pushes more shells to the near planes so the
     /// finale fills the frame; low energy favours calm, distant singles.
+    /// Depth spans a modest 0.72...1.32. Shells still layer and parallax
+    /// against each other, but they all read as being fired from the same
+    /// field rather than one at your feet and the next on the horizon.
     private func pickDepth(_ e: Double) -> Double {
         let u = rng.unit()
         let near = 0.30 + 0.45 * e
-        if rng.unit() < near { return 0.92 + u * 0.93 }        // 0.92 ... 1.85
-        return 0.30 + u * 0.62                                  // 0.30 ... 0.92
+        if rng.unit() < near { return 1.02 + u * 0.30 }         // 1.02 ... 1.32
+        return 0.72 + u * 0.30                                  // 0.72 ... 1.02
     }
 
     private func launchShell(e: Double, target: CGPoint?) {
@@ -1021,14 +1204,14 @@ final class FireworksEngine {
         var rawSY: Double
 
         if let t = target {
-            z = rng.d(0.80, 1.25)
+            z = rng.d(0.85, 1.25)
             burstSX = Double(t.x)
             rawSY = Double(t.y)
         } else {
             z = pickDepth(e)
             burstSX = unitW * rng.d(0.06, 0.94)
             // Far shells sit nearer the horizon, near shells climb high.
-            rawSY = unitH * rng.d(0.08, 0.30) + unitH * 0.17 * (1 - clamp01((z - 0.30) / 1.55))
+            rawSY = unitH * rng.d(0.08, 0.31) + unitH * 0.07 * (1 - clamp01((z - 0.72) / 0.60))
         }
         rawSY = min(rawSY, vanishY - unitH * 0.04)
         let burstSY = rawSY
@@ -1088,10 +1271,11 @@ final class FireworksEngine {
             (.strobe,         0.42),
             (.crackle,        0.28 + 0.40 * e),
             (.salute,         0.04 + 0.42 * e),
-            (.shape,          0.30 - 0.12 * e),
+            (.shape,          0.46 - 0.18 * e),
             (.spiral,         0.22),
             (.multiBreak,     0.08 + 0.40 * e),
-            (.comet,          0.26)
+            (.comet,          0.26),
+            (.cascade,        0.26 + 0.12 * e)
         ]
         var total = 0.0
         for item in table { total += max(0, item.1) }
@@ -1162,10 +1346,23 @@ final class FireworksEngine {
             p.palette.silverMix = max(p.palette.silverMix, 0.7)
             p.trail = false
         case .shape:
-            p.count = Int(Double(p.count) * 0.55)
-            p.radius *= 0.95
+            // A figure needs enough stars to join up, and a single colour to
+            // read as a drawn line rather than confetti.
+            p.count = Int(Double(p.count) * 1.15)
+            p.radius *= 1.12
+            p.life *= 1.15
             p.trail = false
-            p.twinkle = rng.chance(0.5)
+            p.ember = false
+            p.glitter = false
+            p.pistil = false
+            p.crackle = false
+            p.twinkle = rng.chance(0.35)
+            p.palette.n = 1
+            p.palette.rainbow = false
+            p.palette.jitter = 0.008
+            p.palette.silverMix = 0
+            // Eyes, mouth and whiskers burn in a contrasting colour.
+            p.pistilHue = (p.palette.h0 + rng.d(0.34, 0.66)).truncatingRemainder(dividingBy: 1)
         case .spiral:
             p.count = Int(Double(p.count) * 0.7)
             p.trail = true
@@ -1177,6 +1374,23 @@ final class FireworksEngine {
             p.count = Int(Double(p.count) * 0.8)
             p.radius *= 0.85
             p.life *= 1.4
+        case .cascade:
+            // Each star ends up as 27, so start with very few.
+            p.count = Int(Double(p.count) * 0.13)
+            p.radius *= 0.85
+            p.life = rng.d(2.7, 3.5)
+            p.trail = true
+            p.ember = false
+            p.pistil = false
+        }
+
+        // Colour-changing stars. Not for figures, which need one colour to
+        // stay legible, nor salutes, which are over before they could.
+        if p.type != .shape && p.type != .salute && rng.chance(0.22) {
+            p.colorShift = true
+            p.shiftHue = (p.palette.h0 + rng.d(0.28, 0.72)).truncatingRemainder(dividingBy: 1)
+            p.shiftAt = rng.d(0.34, 0.58)
+            p.ember = false
         }
 
         // Density budget: a finale runs many smaller shells, not many huge ones.
@@ -1237,7 +1451,10 @@ final class FireworksEngine {
                            trail: UInt8, flags: PFlags,
                            splitAge: Double = -1, splitSpeed: Double = 0,
                            splitHue: Double = -1, jitter: Double = 0,
-                           buoy: Double = 0.30) {
+                           buoy: Double = 0.30,
+                           splitsLeft: UInt8 = 0, splitGap: Double = 0.45,
+                           splitFan: UInt8 = 4,
+                           hue2: Double = -1, hueShiftAt: Double = -1) {
         guard particles.count < maxParticles else { return }
         var p = Particle()
         p.x = x; p.y = y; p.vx = vx; p.vy = vy
@@ -1246,6 +1463,8 @@ final class FireworksEngine {
         p.drag = drag; p.grav = grav; p.windK = windK; p.decay = decay; p.buoy = buoy
         p.trail = trail; p.flags = flags
         p.splitAge = splitAge; p.splitSpeed = splitSpeed; p.splitHue = splitHue
+        p.splitsLeft = splitsLeft; p.splitGap = splitGap; p.splitFan = splitFan
+        p.hue2 = hue2; p.hueShiftAt = hueShiftAt
         p.jitter = jitter
         p.phase = rng.d(0, 6.283)
         p.rate = rng.d(9, 27)
@@ -1275,7 +1494,9 @@ final class FireworksEngine {
                           extra: PFlags = [], hueOverride: Double = -1,
                           splitAge: Double = -1, splitSpeed: Double = 0, splitHue: Double = -1,
                           jitter: Double = 0, brightScale: Double = 1, windK: Double = 1,
-                          buoy: Double = 0.30) {
+                          buoy: Double = 0.30,
+                          splitsLeft: UInt8 = 0, splitGap: Double = 0.45,
+                          splitFan: UInt8 = 4) {
         let silver = plan.palette.isSilver(&rng)
         var flags = starFlags(plan, silver: silver)
         flags.formUnion(extra)
@@ -1283,18 +1504,29 @@ final class FireworksEngine {
         // The third dimension never moves the star on screen — it only changes
         // how big and how bright it reads. That is the whole 2.5D trick.
         let fs = 1 + dir.z * 0.30
+        let realLife = life * rng.d(0.84, 1.16)
+        // Colour-changing stars burn through to a second composition partway
+        // down, which is a real trick and a lovely one.
+        var h2 = -1.0
+        var shiftAt = -1.0
+        if plan.colorShift {
+            h2 = plan.shiftHue + rng.d(-0.012, 0.012)
+            shiftAt = realLife * plan.shiftAt * rng.d(0.92, 1.08)
+        }
         spawnStar(x: x, y: y,
                   vx: bvx + dir.x * speed,
                   vy: bvy + dir.y * speed,
                   z: plan.z, fs: fs,
-                  life: life * rng.d(0.84, 1.16),
+                  life: realLife,
                   size: size,
                   hue: hue,
                   bright: rng.d(0.82, 1.12) * brightScale,
                   drag: drag, grav: grav, windK: windK, decay: decay,
                   trail: trail, flags: flags,
                   splitAge: splitAge, splitSpeed: splitSpeed, splitHue: splitHue,
-                  jitter: jitter, buoy: buoy)
+                  jitter: jitter, buoy: buoy,
+                  splitsLeft: splitsLeft, splitGap: splitGap, splitFan: splitFan,
+                  hue2: h2, hueShiftAt: shiftAt)
     }
 
     @inline(__always) private func randomDir(_ r: inout FastRNG) -> V3 {
@@ -1310,7 +1542,7 @@ final class FireworksEngine {
 
         // Break flash + camera exposure lift.
         flashes.append(Flash(x: x, y: y, z: plan.z, age: 0,
-                             life: plan.type == .salute ? 0.34 : 0.24,
+                             life: plan.type == .salute ? 0.42 : 0.32,
                              radius: plan.radius * 0.55,
                              hue: plan.palette.hue(&rng),
                              silver: plan.type == .salute,
@@ -1510,6 +1742,23 @@ final class FireworksEngine {
                 }
             }
 
+        case .cascade:
+            let cascV = burstSpeed(plan.radius, 0.95, 1.00)
+            let gap = rng.d(0.40, 0.60)
+            let childV = burstSpeed(plan.radius * 0.30, 1.30, 0.50)
+            let childHue = rng.chance(0.70) ? Palette.niceHue(&rng) : -1
+            for _ in 0..<plan.count {
+                let d = randomDir(&rng)
+                emitStar(plan, x: x, y: y, bvx: vx, bvy: vy, dir: d,
+                         speed: cascV * rng.d(0.90, 1.05),
+                         life: plan.life, size: baseSize * 1.20,
+                         drag: 0.95, grav: 0.95, decay: 1.25, trail: 3,
+                         splitAge: gap * rng.d(0.92, 1.08),
+                         splitSpeed: childV,
+                         splitHue: childHue,
+                         splitsLeft: 2, splitGap: gap, splitFan: 3)
+            }
+
         case .comet:
             let cometV = burstSpeed(plan.radius, 0.45, 1.90)
             let a0 = rng.d(0, 6.2831853)
@@ -1588,57 +1837,45 @@ final class FireworksEngine {
 
     private func emitOutline(_ plan: ShellPlan, x: Double, y: Double,
                              vx: Double, vy: Double, size: Double) {
-        var pts: [(Double, Double)] = []
-        pts.reserveCapacity(plan.count)
-        let kind = rng.i(0, 2)
+        let kind = rng.i(0, 7)
+        var o = Outline()
+        o.reserve(plan.count)
         let n = plan.count
 
-        if kind == 0 {                                  // heart
-            for i in 0..<n {
-                let t = Double(i) / Double(n) * 6.2831853
-                let s = sin(t)
-                let px = 16 * s * s * s
-                let py = 13 * cos(t) - 5 * cos(2 * t) - 2 * cos(3 * t) - cos(4 * t)
-                pts.append((px / 17.0, -py / 17.0))
-            }
-        } else if kind == 1 {                           // five-point star
-            var verts: [(Double, Double)] = []
-            for i in 0..<10 {
-                let a = -Double.pi / 2 + Double(i) * Double.pi / 5
-                let r = (i % 2 == 0) ? 1.0 : 0.42
-                verts.append((r * cos(a), r * sin(a)))
-            }
-            for i in 0..<n {
-                let u = Double(i) / Double(n) * 10
-                let e = Int(u) % 10
-                let f = u - floor(u)
-                let a = verts[e], b = verts[(e + 1) % 10]
-                pts.append((a.0 + (b.0 - a.0) * f, a.1 + (b.1 - a.1) * f))
-            }
-        } else {                                        // flower / rosette
-            let petals = Double(rng.i(4, 7))
-            for i in 0..<n {
-                let t = Double(i) / Double(n) * 6.2831853
-                let r = 0.55 + 0.45 * cos(petals * t)
-                pts.append((r * cos(t), r * sin(t)))
-            }
+        switch kind {
+        case 0: Outline.heart(&o, n)
+        case 1: Outline.star5(&o, n)
+        case 2: Outline.flower(&o, n, petals: rng.i(4, 7))
+        case 3: Outline.cat(&o, n)
+        case 4: Outline.smiley(&o, n)
+        case 5: Outline.bone(&o, n)
+        case 6: Outline.peace(&o, n)
+        default: Outline.person(&o, n)
         }
 
-        let shapeV = burstSpeed(plan.radius, 1.0, 1.30)
-        let tilt = rng.d(-0.55, 0.55)
+        // A figure has an up and a front; a rosette does not. Keep the
+        // recognisable ones close to upright and facing the audience.
+        let figure = kind != 1 && kind != 2
+        let tilt = figure ? rng.d(-0.26, 0.26) : rng.d(-0.55, 0.55)
+        let spin = figure ? rng.d(-0.09, 0.09) : rng.d(-0.35, 0.35)
         let ct = cos(tilt), st = sin(tilt)
-        let spin = rng.d(-0.35, 0.35)
         let cs = cos(spin), ss = sin(spin)
 
-        for p in pts {
+        let shapeV = burstSpeed(plan.radius, 1.0, 1.30)
+        let detailHue = plan.pistilHue
+
+        for i in 0..<o.pts.count {
+            let p = o.pts[i]
             let rx = p.0 * cs - p.1 * ss
             let ry = p.0 * ss + p.1 * cs
             let d = V3(x: rx * ct, y: ry, z: rx * st)
+            let isDetail = o.detail[i]
             emitStar(plan, x: x, y: y, bvx: vx, bvy: vy, dir: d,
                      speed: shapeV * rng.d(0.99, 1.01),
-                     life: plan.life * 1.1, size: size * 1.05,
+                     life: plan.life * 1.1, size: size * (isDetail ? 1.15 : 1.05),
                      drag: 1.0, grav: 0.85, decay: 1.5, trail: 0,
-                     brightScale: 1.1)
+                     hueOverride: isDetail ? detailHue : -1,
+                     brightScale: isDetail ? 1.25 : 1.1)
         }
     }
 
@@ -1663,23 +1900,37 @@ final class FireworksEngine {
 
                 // Crossette: the star breaks into four fresh ones.
                 if p.splitAge > 0 && p.age >= p.splitAge {
+                    let fan = max(2, Int(p.splitFan))
+                    let step = 6.2831853 / Double(fan)
                     let sp = p.splitSpeed
                     let base = atan2(p.vy, p.vx)
-                    for k in 0..<4 {
+                    let remaining = max(0.25, p.life - p.age)
+                    for k in 0..<fan {
                         var c = p
-                        let a = base + Double(k) * 1.5707963 + rng.d(-0.10, 0.10)
+                        let a = base + Double(k) * step + rng.d(-0.10, 0.10)
                         c.vx = p.vx * 0.30 + cos(a) * sp * rng.d(0.85, 1.15)
                         c.vy = p.vy * 0.30 + sin(a) * sp * rng.d(0.85, 1.15)
                         c.age = 0
-                        c.life = max(0.35, (p.life - p.splitAge) * rng.d(0.75, 1.15))
-                        c.splitAge = -1
-                        c.size = p.size * 0.85
+                        c.life = max(0.32, remaining * rng.d(0.75, 1.15))
+                        c.size = p.size * 0.86
                         c.drag = 1.30
                         c.decay = 1.6
                         c.trail = 2
                         c.phase = rng.d(0, 6.283)
+                        if p.splitsLeft > 0 {
+                            // Another break is coming; make sure it lives to see it.
+                            c.splitsLeft = p.splitsLeft - 1
+                            c.splitAge = p.splitGap * rng.d(0.88, 1.12)
+                            c.splitSpeed = sp * 0.58
+                            c.life = max(c.life, c.splitAge + 0.30)
+                        } else {
+                            c.splitsLeft = 0
+                            c.splitAge = -1
+                        }
                         if p.splitHue >= 0 {
                             c.hue = p.splitHue
+                            c.hue2 = -1
+                            c.hueShiftAt = -1
                             c.flags.subtract(.silver)
                         }
                         newborn.append(c)
@@ -1695,16 +1946,19 @@ final class FireworksEngine {
                 // Gravity, less the buoyancy of a star that is still burning.
                 let heat = 1 - p.age / p.life
                 p.vy += g * (p.grav - p.buoy * heat * heat) * dt
-                p.vx += w * p.windK * dt
 
                 // Quadratic drag, integrated semi-implicitly so it is stable
                 // at any speed. This is the whole reason a shell can stop dead
                 // at its burst radius and still fall like a real object: at
                 // 70 m/s the braking is fierce, at walking pace it is nothing.
-                let sp = (p.vx * p.vx + p.vy * p.vy).squareRoot()
+                // Drag acts on motion *through the air*, so a star settles at
+                // the air's own speed instead of being accelerated forever.
+                let air = w * p.windK
+                let rvx = p.vx - air
+                let sp = (rvx * rvx + p.vy * p.vy).squareRoot()
                 if sp > 1e-9 {
                     let f = 1 / (1 + dragK * p.drag * sp * dt)
-                    p.vx *= f
+                    p.vx = air + rvx * f
                     p.vy *= f
                 }
 
@@ -1746,7 +2000,7 @@ final class FireworksEngine {
                 if s.age >= s.life {
                     puffs.remove(at: i)
                 } else {
-                    s.vx += wind * 2.4 * dt
+                    s.vx += (wind * 2.2 - s.vx) * (1 - exp(-dt * 0.5))
                     s.vy -= gravity * 0.55 * dt        // powder smoke is hot
                     let damp = exp(-0.55 * dt)
                     s.vx *= damp; s.vy *= damp
@@ -1875,9 +2129,12 @@ final class FireworksEngine {
 
             let silver = p.flags.contains(.silver)
             var hue = p.hue
+            if p.hueShiftAt > 0 && p.age > p.hueShiftAt {
+                hue = hueLerp(p.hue, p.hue2, clamp01((p.age - p.hueShiftAt) / 0.22))
+            }
             if p.flags.contains(.ember) {
                 // Stars cool to orange as they burn out.
-                hue = hueLerp(p.hue, 0.060, min(1, pow(u, 1.4)))
+                hue = hueLerp(hue, 0.060, min(1, pow(u, 1.4)))
             }
             let idx = hueIndex(hue)
             let halo = silver ? deck.silverHalo : deck.halo[idx]
@@ -1885,7 +2142,7 @@ final class FireworksEngine {
 
             // Cheap depth of field: far shells spread into their glow and
             // lose the hard centre, near ones stay pin-sharp.
-            let soft = 1 + 0.55 * clamp01((0.95 - p.z) / 0.65)
+            let soft = 1 + 0.30 * clamp01((1.06 - p.z) / 0.34)
 
             if !p.flags.contains(.noHalo) {
                 let hr = r * 3.0 * soft
@@ -1947,21 +2204,50 @@ final class FireworksEngine {
 
     private func drawFlashes(_ ctx: inout GraphicsContext, _ deck: ResolvedDeck,
                              _ w: Double, _ h: Double) {
+        // Four layers on their own clocks, all sized off the shell: a hard
+        // white core, a four-point flare that is gone almost at once, a soft
+        // coloured bloom, and a shockwave ring riding out ahead of the stars.
         for f in flashes {
             let u = f.age / f.life
-            let a = pow(1 - u, 2.4) * f.power
-            if a < 0.01 { continue }
+            if u >= 1 { continue }
             let sx = screenX(f.x, f.z)
             let sy = screenY(f.y, f.z)
-            let r = f.radius * f.z * (0.55 + u * 1.4)
-            if sx < -r * 3 || sx > w + r * 3 || sy < -r * 3 || sy > h + r * 3 { continue }
+            let R = f.radius * f.z
+            if sx < -R * 5 || sx > w + R * 5 || sy < -R * 5 || sy > h + R * 5 { continue }
 
             let tint = f.silver ? deck.silverHalo : deck.halo[hueIndex(f.hue)]
-            let hr = r * 2.4
-            ctx.opacity = min(1, a * 0.75)
-            ctx.draw(tint, in: CGRect(x: sx - hr, y: sy - hr, width: hr * 2, height: hr * 2))
-            ctx.opacity = min(1, a * 0.95)
-            ctx.draw(deck.flash, in: CGRect(x: sx - r, y: sy - r, width: r * 2, height: r * 2))
+
+            // Bloom — the slowest of the four.
+            let bloomA = pow(1 - u, 1.9) * f.power * 0.72
+            if bloomA > 0.01 {
+                let br = R * (0.90 + u * 1.45)
+                ctx.opacity = min(1, bloomA)
+                ctx.draw(tint, in: CGRect(x: sx - br, y: sy - br, width: br * 2, height: br * 2))
+            }
+
+            // White core.
+            let coreA = pow(1 - u, 3.4) * f.power
+            if coreA > 0.01 {
+                let cr = R * (0.30 + u * 0.40)
+                ctx.opacity = min(1, coreA)
+                ctx.draw(deck.flash, in: CGRect(x: sx - cr, y: sy - cr, width: cr * 2, height: cr * 2))
+            }
+
+            // Flare spikes — first frames only.
+            let flareA = pow(1 - u, 5.5) * f.power * 0.95
+            if flareA > 0.02 {
+                let fr = R * (1.7 + u * 2.2)
+                ctx.opacity = min(1, flareA)
+                ctx.draw(deck.glint, in: CGRect(x: sx - fr, y: sy - fr, width: fr * 2, height: fr * 2))
+            }
+
+            // Shockwave.
+            let ringA = pow(1 - u, 1.5) * min(1.0, f.power) * 0.42
+            if ringA > 0.01 {
+                let rr = R * (0.22 + u * u * 1.9 + u * 0.55)
+                ctx.opacity = min(1, ringA)
+                ctx.draw(deck.shock, in: CGRect(x: sx - rr, y: sy - rr, width: rr * 2, height: rr * 2))
+            }
         }
     }
 }
