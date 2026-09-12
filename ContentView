@@ -2374,10 +2374,13 @@ final class FireworksEngine {
 struct SVFilter {
     var low: Double = 0
     var band: Double = 0
+    var high: Double = 0
 
-    /// `f` is 2·sin(π·fc/sr); `q` is damping (smaller = more resonant).
+    /// `f` is 2·sin(π·fc/sr), `q` is damping — smaller means more resonant,
+    /// and more resonant means more tonal. Keep q up for anything that should
+    /// read as a tick rather than a chime. Stable while f < 2 - q.
     @inline(__always) mutating func run(_ x: Double, _ f: Double, _ q: Double) {
-        let high = x - low - q * band
+        high = x - low - q * band
         band += f * high
         low += f * band
     }
@@ -2543,9 +2546,9 @@ final class AudioDirector {
                        buildCrackle(seed: 433, dur: 1.05),
                        buildCrackle(seed: 467, dur: 1.25)]
         case .shimmer:
-            samples = [buildShimmer(seed: 503, hz: 5400, dur: 1.50),
-                       buildShimmer(seed: 541, hz: 6600, dur: 1.40),
-                       buildShimmer(seed: 587, hz: 7600, dur: 1.60)]
+            samples = [buildShimmer(seed: 503, hz: 3800, dur: 1.50),
+                       buildShimmer(seed: 541, hz: 4600, dur: 1.40),
+                       buildShimmer(seed: 587, hz: 5400, dur: 1.60)]
         }
         return samples.compactMap { pcm($0, format: format) }
     }
@@ -2640,59 +2643,82 @@ final class AudioDirector {
         let grain = Int(sr * 0.018)
         var t = 0.015
         while t < dur {
-            let density = 190 * exp(-t * 1.15)
+            let density = 265 * exp(-t * 1.15)
             t += r.d(0.35, 1.9) / max(8, density)
             let start = Int(t * sr)
             if start + 2 >= n { break }
             let amp = r.d(0.25, 1.0) * exp(-t * 0.9)
-            let f = 2 * sin(Double.pi * r.d(1900, 5400) / sr)
-            let dec = r.d(190, 430)
+            let f = min(1.30, 2 * sin(Double.pi * r.d(1500, 5200) / sr))
+            let dec = r.d(260, 620)
+            let bite = r.d(0.30, 0.85)
             var sv = SVFilter()
             let len = min(grain, n - start)
             for j in 0..<len {
                 let tt = Double(j) / sr
-                sv.run(r.d(-1, 1), f, 0.22)
-                out[start + j] += Float(sv.band * exp(-tt * dec) * amp * 0.42)
+                // Damped wide, so each one snaps rather than pings.
+                sv.run(r.d(-1, 1), f, 0.55)
+                let g = (sv.band + sv.high * bite) * exp(-tt * dec)
+                out[start + j] += Float(g * amp * 0.40)
             }
         }
         addTaps(&out, [(0.095, 0.22), (0.185, 0.12)])
         return out
     }
 
-    /// Shimmer: breathy high band that wobbles, plus a few tiny tinkles.
+    /// The sparkle of glittering stars: a dense sizzle of tiny sharp pops
+    /// that thins into a string of separate cracks, like a fuse of small
+    /// firecrackers running out.
+    ///
+    /// Deliberately broadband. The first version of this used clean sine
+    /// pings, which is exactly how you build a wind chime — a resonant
+    /// partial with a long ring is a musical note, not a spark. Here every
+    /// grain is noise through a wide, heavily damped filter with some raw
+    /// high end riding along, and it dies in a couple of milliseconds.
     private func buildShimmer(seed: UInt64, hz: Double, dur: Double) -> [Float] {
         let sr = Self.sampleRate
         let n = Int(dur * sr)
         var out = [Float](repeating: 0, count: n)
         var r = FastRNG(seed: seed)
-        var sv = SVFilter()
-        var mod = 0.5
-        let f = 2 * sin(Double.pi * hz / sr)
-        let aMod = 1 - exp(-2 * Double.pi * 11 / sr)
-        for i in 0..<n {
-            let t = Double(i) / sr
-            sv.run(r.d(-1, 1), f, 0.45)
-            mod += (r.unit() - mod) * aMod
-            let env = min(1, t * 5) * exp(-t * 1.55)
-            out[i] = Float(sv.band * env * (0.20 + 1.05 * mod * mod) * 0.40)
-        }
-        // tinkles
-        let pings = 26
-        for _ in 0..<pings {
-            let t0 = r.d(0.02, dur * 0.72)
-            let start = Int(t0 * sr)
-            let len = min(Int(sr * 0.09), n - start)
-            if len <= 2 { continue }
-            let pf = r.d(3200, 9000)
-            let amp = r.d(0.05, 0.20) * exp(-t0 * 0.8)
-            var ph = 0.0
+
+        // The pops. Dense enough at the start to merge into a roar, thinning
+        // to countable cracks by the end.
+        let grain = Int(sr * 0.007)
+        var t = 0.008
+        while t < dur {
+            let density = 640 * exp(-t * 1.7)
+            t += r.d(0.25, 2.2) / max(25, density)
+            let start = Int(t * sr)
+            if start + 2 >= n { break }
+            let amp = r.d(0.12, 1.0) * exp(-t * 1.25)
+            let fc = min(9000, r.d(hz * 0.40, hz * 1.55))
+            let f = min(1.30, 2 * sin(Double.pi * fc / sr))
+            let q = r.d(0.42, 0.85)          // wide, so it ticks instead of rings
+            let dec = r.d(450, 1500)         // gone in 1-2 ms
+            let bite = r.d(0.25, 0.70)       // raw high end mixed in
+            var sv = SVFilter()
+            let len = min(grain, n - start)
             for j in 0..<len {
                 let tt = Double(j) / sr
-                ph += 2 * Double.pi * pf / sr
-                out[start + j] += Float(sin(ph) * exp(-tt * 26) * amp)
+                sv.run(r.d(-1, 1), f, q)
+                let g = (sv.band + sv.high * bite) * exp(-tt * dec)
+                out[start + j] += Float(g * amp * 0.34)
             }
         }
-        addTaps(&out, [(0.11, 0.20)])
+
+        // A thin sizzle underneath so the gaps never sound gated or synthetic.
+        var bed = SVFilter()
+        var mod = 0.5
+        let fBed = min(1.30, 2 * sin(Double.pi * min(7000, hz * 0.85) / sr))
+        let aMod = 1 - exp(-2 * Double.pi * 26 / sr)
+        for i in 0..<n {
+            let tt = Double(i) / sr
+            bed.run(r.d(-1, 1), fBed, 0.85)
+            mod += (r.unit() - mod) * aMod
+            let env = min(1, tt * 9) * exp(-tt * 2.4)
+            out[i] += Float(bed.band * env * (0.15 + 0.85 * mod * mod) * 0.13)
+        }
+
+        addTaps(&out, [(0.085, 0.20), (0.163, 0.10)])
         return out
     }
 }
