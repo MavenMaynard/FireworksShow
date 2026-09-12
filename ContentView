@@ -2310,10 +2310,13 @@ final class FireworksEngine {
 
             let tint = f.silver ? deck.silverHalo : deck.halo[hueIndex(f.hue)]
 
-            // Bloom — the slowest of the four.
+            // Bloom — the slowest of the four. Everything here is sized to
+            // stay inside the star front, which only reaches about 0.4 of the
+            // shell radius in the time the flash is alive. Overshoot that and
+            // the break reads as a big empty halo with a small shell in it.
             let bloomA = pow(1 - u, 1.9) * f.power * 0.72
             if bloomA > 0.01 {
-                let br = R * (0.90 + u * 1.45)
+                let br = R * (0.12 + u * 0.52)
                 ctx.opacity = min(1, bloomA)
                 ctx.draw(tint, in: CGRect(x: sx - br, y: sy - br, width: br * 2, height: br * 2))
             }
@@ -2330,8 +2333,8 @@ final class FireworksEngine {
             // lens flare parked on the middle.
             let flareA = pow(1 - u, 5.0) * f.power * 0.42
             if flareA > 0.02 {
-                let fr = R * (0.40 + u * 0.52)
-                let ring = R * (0.52 + u * 1.05)
+                let fr = R * (0.10 + u * 0.13)
+                let ring = R * (0.10 + u * 0.34)
                 ctx.opacity = min(1, flareA)
                 for k in 0..<5 {
                     let a = f.spin + Double(k) * 1.2566371      // 2pi / 5
@@ -2343,9 +2346,10 @@ final class FireworksEngine {
             }
 
             // Shockwave.
-            let ringA = pow(1 - u, 1.5) * min(1.0, f.power) * 0.42
+            let ringA = pow(1 - u, 1.5) * min(1.0, f.power) * 0.36
             if ringA > 0.01 {
-                let rr = R * (0.22 + u * u * 1.9 + u * 0.55)
+                // Grows fast then eases, the same way the stars do.
+                let rr = R * (0.08 + u * u * 0.26 + u * 0.38)
                 ctx.opacity = min(1, ringA)
                 ctx.draw(deck.shock, in: CGRect(x: sx - rr, y: sy - rr, width: rr * 2, height: rr * 2))
             }
