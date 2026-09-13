@@ -2366,17 +2366,27 @@ final class FireworksEngine {
             // Sparkles wink most of the way out; plain dots breathe.
             let tw = s.glint ? (0.16 + 0.84 * pow(max(0, osc), 1.4))
                              : (0.52 + 0.48 * osc)
-            let a = s.bright * tw
+            var a = s.bright * tw
+
+            // Below the horizon there is no sky, only water. A star barely
+            // makes it onto the surface at all, and what does is gone within
+            // a short way of the shore — so these fade hard, and shiver.
+            var sxDraw = sx
+            if sy > vanishY {
+                let depth = min(1, (sy - vanishY) / max(1, h - vanishY))
+                a *= 0.13 * pow(1 - depth, 1.6)
+                sxDraw += sin(sy * 0.07 + time * 1.4 + s.phase) * (0.6 + depth * 2.4)
+            }
             if a < 0.02 { continue }
 
             ctx.opacity = a
             if s.glint {
                 let g = s.size * 2.7
-                ctx.draw(deck.glint, in: CGRect(x: sx - g, y: sy - g, width: g * 2, height: g * 2))
+                ctx.draw(deck.glint, in: CGRect(x: sxDraw - g, y: sy - g, width: g * 2, height: g * 2))
             } else {
                 let r = s.size
                 let sym = s.tint == 1 ? deck.starWarm : (s.tint == 2 ? deck.starCool : deck.silverCore)
-                ctx.draw(sym, in: CGRect(x: sx - r, y: sy - r, width: r * 2, height: r * 2))
+                ctx.draw(sym, in: CGRect(x: sxDraw - r, y: sy - r, width: r * 2, height: r * 2))
             }
         }
     }
