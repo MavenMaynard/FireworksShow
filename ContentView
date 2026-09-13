@@ -1198,11 +1198,16 @@ final class FireworksEngine {
     private func buildStars() {
         stars.removeAll(keepingCapacity: true)
         var r = FastRNG(seed: 0xF00D_BEEF)
+        // Stars stop at the waterline. Below it is lake, not sky.
+        let skyBottom = vanishY / max(1, unitH)
+        // Same count over a shorter band would thicken the sky, so scale it
+        // back to hold the density it had when the field ran the full frame.
+        let densityHold = (skyBottom + 0.09) / 1.10
         let layers = 7
         for l in 0..<layers {
             let f = Double(l) / Double(layers - 1)          // 0 = deepest, 1 = nearest
             let parallax = 0.015 + 0.235 * pow(f, 1.7)
-            let count = Int(215 - 160 * f)                  // deep layers are dense dust
+            let count = Int((215 - 160 * f) * densityHold)  // deep layers are dense dust
             let sizeLo = 0.70 + 1.10 * f                    // 1.4 px across at the back
             let sizeHi = 1.15 + 2.35 * f                    // 7.0 px across at the front
             let brightLo = 0.05 + 0.11 * f
@@ -1210,9 +1215,9 @@ final class FireworksEngine {
             for _ in 0..<count {
                 var st = Star()
                 st.ux = r.unit()
-                // Past both edges, so a vertical camera drift never exposes a
-                // bare band. There is no horizon here — the sky fills the frame.
-                st.uy = r.d(-0.05, 1.05)
+                // A little past the top edge and a little past the waterline,
+                // so a vertical camera drift never exposes a bare band.
+                st.uy = r.d(-0.05, skyBottom + 0.04)
                 st.parallax = parallax
                 st.size = r.d(sizeLo, sizeHi)
                 st.bright = r.d(brightLo, brightHi)
@@ -2366,27 +2371,20 @@ final class FireworksEngine {
             // Sparkles wink most of the way out; plain dots breathe.
             let tw = s.glint ? (0.16 + 0.84 * pow(max(0, osc), 1.4))
                              : (0.52 + 0.48 * osc)
-            var a = s.bright * tw
+            let a = s.bright * tw
 
-            // Below the horizon there is no sky, only water. A star barely
-            // makes it onto the surface at all, and what does is gone within
-            // a short way of the shore — so these fade hard, and shiver.
-            var sxDraw = sx
-            if sy > vanishY {
-                let depth = min(1, (sy - vanishY) / max(1, h - vanishY))
-                a *= 0.13 * pow(1 - depth, 1.6)
-                sxDraw += sin(sy * 0.07 + time * 1.4 + s.phase) * (0.6 + depth * 2.4)
-            }
+            // The field ends at the waterline.
+            if sy > vanishY { continue }
             if a < 0.02 { continue }
 
             ctx.opacity = a
             if s.glint {
                 let g = s.size * 2.7
-                ctx.draw(deck.glint, in: CGRect(x: sxDraw - g, y: sy - g, width: g * 2, height: g * 2))
+                ctx.draw(deck.glint, in: CGRect(x: sx - g, y: sy - g, width: g * 2, height: g * 2))
             } else {
                 let r = s.size
                 let sym = s.tint == 1 ? deck.starWarm : (s.tint == 2 ? deck.starCool : deck.silverCore)
-                ctx.draw(sym, in: CGRect(x: sxDraw - r, y: sy - r, width: r * 2, height: r * 2))
+                ctx.draw(sym, in: CGRect(x: sx - r, y: sy - r, width: r * 2, height: r * 2))
             }
         }
     }
