@@ -1179,7 +1179,13 @@ final class FireworksEngine {
         unitW = Double(s.width)
         vanishX = unitW * 0.5
         vanishY = unitH * 0.60          // horizon / vanishing line
-        groundY = unitH * 0.30          // camera height above the launch plane
+        // Camera height above the water. It is small on purpose: the show is
+        // fired from barges out across the water, so their line sits just
+        // under the horizon and the whole foreground is open water. With the
+        // camera up high instead, the water plane at the shells' distance
+        // lands on the bottom edge of the frame and there is nowhere for a
+        // reflection to go.
+        groundY = unitH * 0.055
         buildStars()
     }
 
@@ -1294,6 +1300,12 @@ final class FireworksEngine {
     }
     private func soundPan(_ sx: Double) -> Double {
         max(-1, min(1, ((sx / max(1, unitW)) * 2 - 1) * 0.8))
+    }
+
+    /// Screen height of the water surface at a given depth. At the horizon
+    /// this converges on the vanishing line; nearer shells sit lower.
+    @inline(__always) private func waterLine(_ z: Double) -> Double {
+        vanishY + (groundY - camY) * z
     }
 
     /// Distant shells are hazier and dimmer.
@@ -2147,6 +2159,10 @@ final class FireworksEngine {
         let dragK = dragUnit
         // Sparks are not free. As the field fills up, shedding thins out
         // rather than blowing the budget and starving the shells themselves.
+        // A star that reaches the water goes out. Without this they sink
+        // through the surface and keep burning, which is the single most
+        // obvious tell that the water is painted on.
+        let waterPlane = groundY + unitH * 0.004
         let load = Double(particles.count) / Double(max(1, maxParticles))
         let shedScale = quality * max(0, 1 - load * load * 1.15)
         let spark = unitH * 0.0022
@@ -2225,6 +2241,8 @@ final class FireworksEngine {
 
                 p.x += p.vx * dt
                 p.y += p.vy * dt
+
+                if p.vy > 0 && p.y > waterPlane { continue }
 
                 // A glittering star drops burning grains the whole way out.
                 // They hang where they fall, so the path itself draws the long
@@ -2345,10 +2363,11 @@ final class FireworksEngine {
         ctx.blendMode = .plusLighter
 
         drawStars(&ctx, deck, w, h)
+        drawWaterSurface(&ctx, w, h)
         drawPuffs(&ctx, deck, w, h)
         drawParticles(&ctx, deck, w, h)
         drawRockets(&ctx, deck, w, h)
-        drawWater(&ctx, deck, w, h)
+        drawReflections(&ctx, deck, w, h)
         drawFlashes(&ctx, deck, w, h)
 
         if exposure > 0.004 {
@@ -2414,48 +2433,109 @@ final class FireworksEngine {
         }
     }
 
-    /// The show is over water, so everything above the horizon gets a second,
-    /// wrecked copy below it.
-    ///
-    /// A true mirror of a shell 150 m up would land a hair under the horizon
-    /// and be invisible, so the reflection is compressed to about half depth
-    /// to keep it on screen. What sells it is not the mirror anyway — it is
-    /// that every reflected point is smeared into a tall vertical streak and
-    /// pushed sideways by the ripple, which is exactly what a light source
-    /// does on moving water.
-    private func drawWater(_ ctx: inout GraphicsContext, _ deck: ResolvedDeck,
-                           _ w: Double, _ h: Double) {
+    /// The surface itself. A black rectangle below the horizon is a void, not
+    /// a lake — what makes it read as a plane going away from you is swell
+    /// spaced by perspective: bands crowded at the horizon, opening out as
+    /// they come toward the camera, drifting in at a rate that accelerates
+    /// with the same curve.
+    private func drawWaterSurface(_ ctx: inout GraphicsContext, _ w: Double, _ h: Double) {
         let waterY = vanishY
-        guard waterY < h - 8 else { return }
+        guard waterY < h - 4 else { return }
         let span = h - waterY
-        let t = time
 
-        // The surface itself, lit by whatever is going off above it.
-        let sheen = min(0.10, 0.010 + exposure * 0.055)
-        if sheen > 0.004 {
-            ctx.opacity = 1
+        // Distant water catching the skyglow. One soft band at the horizon
+        // does more for the sense of distance than anything else here.
+        let glow = min(0.13, 0.018 + exposure * 0.050)
+        ctx.opacity = 1
+        ctx.fill(Path(CGRect(x: 0, y: waterY, width: w, height: span * 0.20)),
+                 with: .linearGradient(
+                    Gradient(stops: [
+                        .init(color: Color(red: 0.40, green: 0.50, blue: 0.70).opacity(glow), location: 0.0),
+                        .init(color: Color(red: 0.30, green: 0.40, blue: 0.62).opacity(glow * 0.25), location: 0.45),
+                        .init(color: Color.clear, location: 1.0)
+                    ]),
+                    startPoint: CGPoint(x: 0, y: waterY),
+                    endPoint: CGPoint(x: 0, y: waterY + span * 0.20)))
+
+        // A wash over the whole surface, so the water lifts when something
+        // big goes off above it.
+        let wash = min(0.09, 0.006 + exposure * 0.050)
+        if wash > 0.003 {
             ctx.fill(Path(CGRect(x: 0, y: waterY, width: w, height: span)),
                      with: .linearGradient(
-                        Gradient(colors: [Color(red: 0.30, green: 0.40, blue: 0.62).opacity(sheen),
+                        Gradient(colors: [Color(red: 0.26, green: 0.36, blue: 0.58).opacity(wash),
                                           Color.clear]),
                         startPoint: CGPoint(x: 0, y: waterY),
                         endPoint: CGPoint(x: 0, y: h)))
+        }
+
+        // The swell.
+        let bands = quality > 0.62 ? 46 : 26
+        let base = 0.013 + exposure * 0.050
+        for i in 0..<bands {
+            var u = Double(i) / Double(bands) + time * 0.012
+            u -= floor(u)
+            let p = pow(u, 1.9)                       // perspective spacing
+            let y = waterY + span * p
+            if y >= h { continue }
+            let thick = max(0.9, span * (0.004 + 0.030 * p))
+            // fade in off the horizon, and back out underfoot
+            let edge = min(1, p * 9) * (1 - p * 0.55)
+            let shimmer = 0.55 + 0.45 * sin(Double(i) * 2.37 + time * 0.85)
+            let a = base * edge * shimmer
+            if a < 0.0022 { continue }
+            let c = Color(red: 0.44, green: 0.56, blue: 0.78)
+            let ph = Double(i) * 1.7 + time * 0.4
+            ctx.fill(Path(CGRect(x: 0, y: y, width: w, height: thick)),
+                     with: .linearGradient(
+                        Gradient(stops: [
+                            .init(color: c.opacity(a * (0.45 + 0.55 * (0.5 + 0.5 * sin(ph)))), location: 0.0),
+                            .init(color: c.opacity(a * (0.45 + 0.55 * (0.5 + 0.5 * sin(ph + 2.1)))), location: 0.5),
+                            .init(color: c.opacity(a * (0.45 + 0.55 * (0.5 + 0.5 * sin(ph + 4.2)))), location: 1.0)
+                        ]),
+                        startPoint: CGPoint(x: 0, y: y),
+                        endPoint: CGPoint(x: w, y: y)))
+        }
+    }
+
+    /// Everything above the water gets a second, wrecked copy below it.
+    ///
+    /// Reflection is about the water surface *at the object's own depth*, not
+    /// about the horizon — that is what makes a spark falling toward the water
+    /// meet its own reflection at the surface instead of jumping across a
+    /// seam. A true mirror of a shell 150 m up lands far below the frame, so
+    /// the drop is squeezed through a saturating curve: near the surface it is
+    /// close to one-to-one, and high shells pile up together partway down the
+    /// water, which is what a real glitter path does.
+    private func drawReflections(_ ctx: inout GraphicsContext, _ deck: ResolvedDeck,
+                                 _ w: Double, _ h: Double) {
+        guard vanishY < h - 8 else { return }
+        let t = time
+        let knee = unitH * 0.45
+
+        // Returns where a point reflects to, and how far down the water it
+        // lands (0 at the surface, 1 at the near edge of the frame).
+        func mirror(_ sy: Double, _ z: Double) -> (Double, Double)? {
+            let surface = waterLine(z)
+            let above = surface - sy
+            if above <= 0 || surface >= h - 2 { return nil }
+            let room = h - surface
+            let drop = room * above / (above + knee)
+            let ry = surface + drop
+            if ry > h + 40 { return nil }
+            return (ry, min(1, drop / room))
         }
 
         // Flashes throw the widest glare, and there are few of them.
         for fl in flashes {
             let u = fl.age / fl.life
             if u >= 1 { continue }
-            let sy = screenY(fl.y, fl.z)
-            if sy > waterY { continue }
-            let ry = waterY + (waterY - sy) * 0.52
-            if ry > h + 60 { continue }
-            let depth = min(1, (ry - waterY) / span)
-            let a = pow(1 - u, 1.9) * fl.power * 0.30 * (1 - depth * 0.40)
+            guard let (ry, depth) = mirror(screenY(fl.y, fl.z), fl.z) else { continue }
+            let a = pow(1 - u, 1.9) * fl.power * 0.32 * (1 - depth * 0.35)
             if a < 0.012 { continue }
             let rr = fl.radius * fl.z * (0.50 + u * 0.80)
-            let hh = rr * (2.4 + depth * 5.0)
-            let rip = sin(ry * 0.050 + t * 1.7) * (2 + depth * 18)
+            let hh = rr * (2.2 + depth * 5.4)
+            let rip = sin(ry * 0.050 + t * 1.7) * (1.5 + depth * 20)
             let sx = screenX(fl.x, fl.z) + rip
             let tint = fl.silver ? deck.silverHalo : deck.halo[hueIndex(fl.hue)]
             ctx.opacity = min(1, a)
@@ -2479,22 +2559,18 @@ final class FireworksEngine {
             a *= atmosphere(p.z) * p.fs * 0.34
             if a < 0.025 { continue }
 
-            let sy = screenY(p.y, p.z)
-            if sy > waterY { continue }
-            let ry = waterY + (waterY - sy) * 0.52
-            if ry > h + 30 { continue }
-            let depth = min(1, (ry - waterY) / span)
-            let fade = a * (1 - depth * 0.50)
+            guard let (ry, depth) = mirror(screenY(p.y, p.z), p.z) else { continue }
+            let fade = a * (1 - depth * 0.45)
             if fade < 0.02 { continue }
 
             var hue = p.hue
             if p.flags.contains(.ember) { hue = hueLerp(hue, 0.060, min(1, pow(u, 1.4))) }
             let sym = p.flags.contains(.silver) ? deck.silverCore : deck.core[hueIndex(hue)]
 
-            let rip = sin(ry * 0.055 + t * 2.0 + p.phase) * (1.5 + depth * 15)
+            let rip = sin(ry * 0.055 + t * 2.0 + p.phase) * (1.0 + depth * 17)
             let sx = screenX(p.x, p.z) + rip
             let rr = p.size * p.z * p.fs * (0.95 + depth * 0.55)
-            let hh = rr * (2.0 + depth * 5.5)
+            let hh = rr * (1.8 + depth * 5.8)
             ctx.opacity = min(1, fade)
             ctx.draw(sym, in: CGRect(x: sx - rr, y: ry - hh, width: rr * 2, height: hh * 2))
         }
