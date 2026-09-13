@@ -699,26 +699,26 @@ struct Outline {
         o.arc(0, -0.06, 0.55, 0.42, 2.72, part(n, 0.30), true)
     }
 
-    /// Four lobes and a shaft, proportioned off a real bone outline: the
-    /// lobes sit well outboard and clear of the shaft, and the pair at each
-    /// end stop short of one another so the end pinches in the way it should.
+    /// Four lobes and a shaft. Each lobe runs from where the shaft meets it,
+    /// right around the outside, to the waist — so the ends are genuinely
+    /// round rather than two arcs with a gap between them. The pair at each
+    /// end are joined by a shallow concave waist, which is the detail that
+    /// makes an end read as an end instead of a bowtie.
     static func bone(_ o: inout Outline, _ n: Int) {
         let p = Double.pi
-        let r = 0.22
-        let lobe = part(n, 0.115)
-        o.arc(-0.76, -0.31, r, 0.630 * p, 1.980 * p, lobe)
-        o.arc(-0.76,  0.31, r, 0.020 * p, 1.370 * p, lobe)
-        o.arc( 0.76, -0.31, r, 1.020 * p, 2.370 * p, lobe)
-        o.arc( 0.76,  0.31, r, -0.370 * p, 0.980 * p, lobe)
-        // The pinch between each pair of lobes.
-        let nk = part(n, 0.022)
-        o.line(-0.850, -0.109, -0.792, 0, nk)
-        o.line(-0.792, 0, -0.850, 0.109, nk)
-        o.line( 0.850, -0.109,  0.792, 0, nk)
-        o.line( 0.792, 0,  0.850, 0.109, nk)
-        let bar = part(n, 0.155)
-        o.line(-0.54, -0.296, 0.54, -0.296, bar)
-        o.line(-0.54,  0.296, 0.54,  0.296, bar)
+        let r = 0.215
+        let lobe = part(n, 0.140)
+        o.arc(-0.755, -0.315, r,  0.028 * p, -1.278 * p, lobe)
+        o.arc(-0.755,  0.315, r, -0.028 * p,  1.278 * p, lobe)
+        o.arc( 0.755, -0.315, r,  0.972 * p,  2.278 * p, lobe)
+        o.arc( 0.755,  0.315, r, -0.972 * p, -2.278 * p, lobe)
+        // The waist: an arc of a much larger circle, bulging inward.
+        let waist = part(n, 0.048)
+        o.arc(-1.370, 0, 0.500, -0.0972 * p, 0.0972 * p, waist)
+        o.arc( 1.370, 0, 0.500,  0.9028 * p, 1.0972 * p, waist)
+        let bar = part(n, 0.172)
+        o.line(-0.541, -0.296, 0.541, -0.296, bar)
+        o.line(-0.541,  0.296, 0.541,  0.296, bar)
     }
 
     /// Dog paw: four toes over a rounded-triangle pad.
@@ -1612,6 +1612,19 @@ final class FireworksEngine {
                   shed: shed < 0 ? plan.shedRate : shed)
     }
 
+    /// How far a star strays from a line it is supposed to be on. Enough that
+    /// a figure reads as drawn rather than plotted; not enough to blur what it
+    /// is. Anything laid out on exact geometry — a figure, a ring, a spiral —
+    /// goes through here, or it looks printed.
+    private static let figureWobble = 0.021
+
+    @inline(__always) private func scatter(_ d: V3) -> V3 {
+        let w = Self.figureWobble
+        return V3(x: d.x + rng.d(-w, w),
+                  y: d.y + rng.d(-w, w),
+                  z: d.z + rng.d(-w * 0.7, w * 0.7))
+    }
+
     @inline(__always) private func randomDir(_ r: inout FastRNG) -> V3 {
         let u = r.d(-1, 1)
         let a = r.d(0, 6.2831853)
@@ -1779,11 +1792,12 @@ final class FireworksEngine {
                 for k in 0..<per {
                     let f = Double(k) / Double(per)
                     let a = a0 + f * turns * 6.2831853
-                    let d = V3(x: cos(a), y: sin(a), z: tilt * (1 - f))
+                    let d = scatter(V3(x: cos(a), y: sin(a), z: tilt * (1 - f)))
                     emitStar(plan, x: x, y: y, bvx: vx, bvy: vy, dir: d,
-                             speed: spiralV * (0.25 + 0.85 * f),
+                             speed: spiralV * (0.25 + 0.85 * f) * rng.d(0.984, 1.016),
                              life: plan.life * (0.75 + 0.4 * f), size: baseSize,
-                             drag: 1.0, grav: 0.95, decay: 1.5, trail: 2)
+                             drag: rng.d(0.955, 1.045),
+                             grav: 0.95 * rng.d(0.94, 1.06), decay: 1.5, trail: 2)
                 }
             }
 
@@ -1922,15 +1936,16 @@ final class FireworksEngine {
         let v = burstSpeed(radius, drag, 1.15)
 
         for k in 0..<count {
-            let a = Double(k) / Double(count) * 6.2831853 + phase + rng.d(-0.012, 0.012)
+            let a = Double(k) / Double(count) * 6.2831853 + phase + rng.d(-0.010, 0.010)
             let ca = cos(a), sa = sin(a)
-            let d = V3(x: e1.x * ca + e2.x * sa,
-                       y: e1.y * ca + e2.y * sa,
-                       z: e1.z * ca + e2.z * sa)
+            let d = scatter(V3(x: e1.x * ca + e2.x * sa,
+                               y: e1.y * ca + e2.y * sa,
+                               z: e1.z * ca + e2.z * sa))
             emitStar(plan, x: x, y: y, bvx: vx, bvy: vy, dir: d,
-                     speed: v * rng.d(0.985, 1.015),
+                     speed: v * rng.d(0.984, 1.016),
                      life: plan.life, size: size,
-                     drag: drag, grav: 1.0, decay: 1.6, trail: trail)
+                     drag: drag * rng.d(0.955, 1.045),
+                     grav: rng.d(0.94, 1.06), decay: 1.6, trail: trail)
         }
     }
 
@@ -1970,20 +1985,17 @@ final class FireworksEngine {
         // how hard the air holds it and how heavy it is — so the figure opens
         // up a fraction over its life instead of hanging there stamped out.
         // Tight enough to be unmistakable, loose enough to look real.
-        let wob = 0.032
         for i in 0..<o.pts.count {
             let p = o.pts[i]
             let rx = p.0 * cs - p.1 * ss
             let ry = p.0 * ss + p.1 * cs
-            let d = V3(x: rx * ct + rng.d(-wob, wob),
-                       y: ry + rng.d(-wob, wob),
-                       z: rx * st + rng.d(-wob * 0.7, wob * 0.7))
+            let d = scatter(V3(x: rx * ct, y: ry, z: rx * st))
             let isDetail = o.detail[i]
             emitStar(plan, x: x, y: y, bvx: vx, bvy: vy, dir: d,
-                     speed: shapeV * rng.d(0.975, 1.025),
+                     speed: shapeV * rng.d(0.984, 1.016),
                      life: plan.life * 1.1, size: size * (isDetail ? 1.15 : 1.05),
-                     drag: 1.0 * rng.d(0.93, 1.07),
-                     grav: 0.85 * rng.d(0.88, 1.12),
+                     drag: rng.d(0.955, 1.045),
+                     grav: 0.85 * rng.d(0.925, 1.075),
                      decay: 1.5, trail: 0,
                      hueOverride: isDetail ? detailHue : -1,
                      brightScale: isDetail ? 1.25 : 1.1)
