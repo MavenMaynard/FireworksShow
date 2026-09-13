@@ -1,1 +1,3108 @@
-// Add SwiftUI code here... iOS 26 target platform.
+//
+//  ContentView.swift
+//  Parallax Fireworks — a 2.5D GPU-accelerated particle fireworks show.
+//
+//  Pure SwiftUI. Single file. Canvas + TimelineView, no Metal, no UIKit.
+//  One slider controls the whole show: OFF → lone shells → full finale.
+//  Everything else (shell type, palette, shape, depth, effects) is RNG.
+//
+//  Target: iOS 26
+//
+
+import SwiftUI
+import AVFoundation
+
+// =====================================================================
+// MARK: - Root
+// =====================================================================
+
+struct ContentView: View {
+
+    @State private var engine = FireworksEngine()
+    @State private var intensity: Double = 0.32
+    @State private var showUI = true
+    @State private var scrubbing = false
+    @State private var idleTick = 0
+    @State private var showHint = true
+    @State private var soundOn = true
+
+    var body: some View {
+        ZStack(alignment: .bottom) {
+
+            Color.black.ignoresSafeArea()
+
+            SkyView(engine: engine, intensity: intensity, soundOn: soundOn)
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+                .onTapGesture(count: 1, coordinateSpace: .local) { point in
+                    engine.requestManualShell(at: point)
+                    reveal()
+                }
+                .gesture(
+                    DragGesture(minimumDistance: 8, coordinateSpace: .local)
+                        .onChanged { value in
+                            engine.setDrag(dx: Double(value.translation.width),
+                                           dy: Double(value.translation.height))
+                        }
+                        .onEnded { _ in engine.endDrag() }
+                )
+
+            if showHint {
+                Text("drag the sky  ·  tap to launch")
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .tracking(2.0)
+                    .foregroundStyle(Color.white.opacity(0.28))
+                    .padding(.bottom, 132)
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+            }
+
+            if showUI {
+                ControlDeck(intensity: $intensity, scrubbing: $scrubbing, soundOn: $soundOn)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .preferredColorScheme(.dark)
+        .statusBarHidden()
+        .persistentSystemOverlays(.hidden)
+        .task(id: "\(idleTick)-\(scrubbing)") {
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            if Task.isCancelled { return }
+            if !scrubbing {
+                withAnimation(.easeInOut(duration: 0.75)) { showUI = false }
+            }
+        }
+        .task {
+            try? await Task.sleep(nanoseconds: 7_000_000_000)
+            if Task.isCancelled { return }
+            withAnimation(.easeInOut(duration: 1.2)) { showHint = false }
+        }
+        .task {
+            // Let the first frames land before we spend a moment synthesising
+            // the sound banks.
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            if Task.isCancelled { return }
+            engine.prepareAudio()
+        }
+        .onChange(of: soundOn) { _, _ in idleTick &+= 1 }
+    }
+
+    private func reveal() {
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.86)) { showUI = true }
+        idleTick &+= 1
+    }
+}
+
+// =====================================================================
+// MARK: - The sky (Canvas + TimelineView)
+// =====================================================================
+
+struct SkyView: View {
+
+    let engine: FireworksEngine
+    let intensity: Double
+    let soundOn: Bool
+
+    var body: some View {
+        TimelineView(.animation) { timeline in
+            Canvas(opaque: true, colorMode: .nonLinear, rendersAsynchronously: false) { ctx, size in
+                engine.intensity = intensity
+                engine.soundEnabled = soundOn
+                engine.advance(to: timeline.date, size: size)
+                engine.render(&ctx, size: size)
+            } symbols: {
+                // Every sprite the show can draw, rasterized once by SwiftUI
+                // and then blitted thousands of times per frame. This is what
+                // keeps the particle count high and the frame time low.
+                ForEach(0..<Sprites.hueCount, id: \.self) { i in
+                    GlowSprite(color: Sprites.color(i)).tag(Sprites.haloID(i))
+                    CoreSprite(color: Sprites.color(i)).tag(Sprites.coreID(i))
+                }
+                GlowSprite(color: Sprites.silver).tag(Sprites.silverHaloID)
+                CoreSprite(color: Sprites.silver).tag(Sprites.silverCoreID)
+                FlashSprite().tag(Sprites.flashID)
+                CoreSprite(color: Sprites.starWarm).tag(Sprites.starWarmID)
+                CoreSprite(color: Sprites.starCool).tag(Sprites.starCoolID)
+                GlintSprite().tag(Sprites.glintID)
+                ShockSprite().tag(Sprites.shockID)
+                ForEach(0..<Sprites.smokeVariants, id: \.self) { i in
+                    SmokeCloudSprite(variant: i).tag(Sprites.smokeID(i))
+                }
+            }
+        }
+    }
+}
+
+// =====================================================================
+// MARK: - Sprites
+// =====================================================================
+
+enum Sprites {
+    static let hueCount = 24
+
+    static func color(_ i: Int) -> Color {
+        Color(hue: Double(i) / Double(hueCount), saturation: 0.88, brightness: 1.0)
+    }
+
+    static let silver = Color(red: 0.93, green: 0.96, blue: 1.0)
+
+    static func haloID(_ i: Int) -> Int { 100 + i }
+    static func coreID(_ i: Int) -> Int { 200 + i }
+    static let silverHaloID = 300
+    static let silverCoreID = 301
+    static let smokeVariants = 4
+    static func smokeID(_ i: Int) -> Int { 320 + i }
+    static let flashID = 303
+    static let starWarmID = 304
+    static let starCoolID = 305
+    static let glintID = 306
+    static let shockID = 307
+
+    static let smokeTint = Color(red: 0.74, green: 0.78, blue: 0.88)
+    static let starWarm = Color(red: 1.00, green: 0.84, blue: 0.66)
+    static let starCool = Color(red: 0.68, green: 0.81, blue: 1.00)
+}
+
+/// A four-point sparkle: long spikes, short waist, faded with a radial ramp
+/// so the tips dissolve instead of ending in hard points.
+struct GlintShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        let cx = Double(rect.midX), cy = Double(rect.midY)
+        let big = Double(min(rect.width, rect.height)) * 0.5
+        let small = big * 0.13
+        var p = Path()
+        for i in 0..<8 {
+            let a = Double(i) * (Double.pi / 4) - Double.pi / 2
+            let r = (i % 2 == 0) ? big : small
+            let pt = CGPoint(x: cx + cos(a) * r, y: cy + sin(a) * r)
+            if i == 0 { p.move(to: pt) } else { p.addLine(to: pt) }
+        }
+        p.closeSubpath()
+        return p
+    }
+}
+
+struct GlintSprite: View {
+    var body: some View {
+        ZStack {
+            GlintShape()
+                .fill(
+                    RadialGradient(
+                        stops: [
+                            .init(color: Color.white.opacity(0.95), location: 0.00),
+                            .init(color: Color.white.opacity(0.50), location: 0.16),
+                            .init(color: Color(red: 0.84, green: 0.91, blue: 1.0).opacity(0.16), location: 0.44),
+                            .init(color: Color.clear, location: 1.00)
+                        ],
+                        center: .center, startRadius: 0, endRadius: 32
+                    )
+                )
+            Circle()
+                .fill(
+                    RadialGradient(
+                        stops: [
+                            .init(color: Color.white.opacity(0.95), location: 0.00),
+                            .init(color: Color.white.opacity(0.28), location: 0.45),
+                            .init(color: Color.clear, location: 1.00)
+                        ],
+                        center: .center, startRadius: 0, endRadius: 8
+                    )
+                )
+                .frame(width: 16, height: 16)
+        }
+        .frame(width: 64, height: 64)
+    }
+}
+
+/// Wide, soft falloff — the bloom around a burning star.
+struct GlowSprite: View {
+    let color: Color
+    var body: some View {
+        Circle()
+            .fill(
+                RadialGradient(
+                    stops: [
+                        .init(color: color.opacity(0.95), location: 0.00),
+                        .init(color: color.opacity(0.52), location: 0.14),
+                        .init(color: color.opacity(0.20), location: 0.32),
+                        .init(color: color.opacity(0.06), location: 0.58),
+                        .init(color: color.opacity(0.00), location: 1.00)
+                    ],
+                    center: .center, startRadius: 0, endRadius: 32
+                )
+            )
+            .frame(width: 64, height: 64)
+    }
+}
+
+/// Tight white-hot centre that takes the shell's colour at its edge.
+struct CoreSprite: View {
+    let color: Color
+    var body: some View {
+        Circle()
+            .fill(
+                RadialGradient(
+                    stops: [
+                        .init(color: Color.white.opacity(0.98), location: 0.00),
+                        .init(color: Color.white.opacity(0.80), location: 0.18),
+                        .init(color: color.opacity(0.85), location: 0.42),
+                        .init(color: color.opacity(0.22), location: 0.72),
+                        .init(color: color.opacity(0.00), location: 1.00)
+                    ],
+                    center: .center, startRadius: 0, endRadius: 16
+                )
+            )
+            .frame(width: 32, height: 32)
+    }
+}
+
+/// A cloud of powder smoke, built once and then blitted thousands of times.
+///
+/// The texture is Worley-flavoured: seeds are scattered on a jittered grid
+/// inside a disc, in two octaves, and each becomes a soft blob a little wider
+/// than the grid spacing. They overlap into one continuous lump rather than
+/// reading as separate bubbles, which is what smoke actually looks like. The
+/// whole thing is masked back to nothing well inside the frame, so the sprite
+/// never shows a seam and nothing has to tile.
+struct SmokeCloudSprite: View {
+
+    struct Cell: Identifiable {
+        let id: Int
+        var x: Double, y: Double, r: Double, a: Double
+    }
+
+    private let cells: [Cell]
+    private let span: Double = 168
+
+    init(variant: Int) {
+        var rng = FastRNG(seed: UInt64(variant &+ 1) &* 0x9E37_79B9_7F4A_7C15)
+        var out: [Cell] = []
+        var next = 0
+
+        func octave(_ n: Int, _ maxC: Double, _ rLo: Double, _ rHi: Double,
+                    _ aLo: Double, _ aHi: Double, _ keep: Double) {
+            let sp = 1.0 / Double(n)
+            for gy in 0..<n {
+                for gx in 0..<n {
+                    if rng.unit() > keep { continue }
+                    let x = (Double(gx) + 0.5) * sp - 0.5 + rng.d(-0.5, 0.5) * sp
+                    let y = (Double(gy) + 0.5) * sp - 0.5 + rng.d(-0.5, 0.5) * sp
+                    let d = (x * x + y * y).squareRoot()
+                    if d > maxC { continue }
+                    // thinner toward the rim, so the cloud has a core
+                    let t = d / maxC
+                    let fall = 1 - 0.40 * t * t
+                    out.append(Cell(id: next, x: x, y: y,
+                                    r: sp * rng.d(rLo, rHi),
+                                    a: rng.d(aLo, aHi) * fall))
+                    next += 1
+                }
+            }
+        }
+
+        octave(7,  0.27, 1.15, 1.70, 0.100, 0.170, 1.00)
+        octave(11, 0.30, 1.00, 1.50, 0.055, 0.105, 0.72)
+        cells = out
+    }
+
+    var body: some View {
+        ZStack {
+            ForEach(cells) { c in
+                Circle()
+                    .fill(
+                        RadialGradient(
+                            stops: [
+                                .init(color: Sprites.smokeTint.opacity(c.a), location: 0.00),
+                                .init(color: Sprites.smokeTint.opacity(c.a * 0.62), location: 0.42),
+                                .init(color: Sprites.smokeTint.opacity(c.a * 0.20), location: 0.72),
+                                .init(color: Color.clear, location: 1.00)
+                            ],
+                            center: .center, startRadius: 0,
+                            endRadius: CGFloat(c.r * span)
+                        )
+                    )
+                    .frame(width: CGFloat(c.r * 2 * span), height: CGFloat(c.r * 2 * span))
+                    .offset(x: CGFloat(c.x * span), y: CGFloat(c.y * span))
+            }
+        }
+        .frame(width: CGFloat(span), height: CGFloat(span))
+        .compositingGroup()
+        .mask(
+            RadialGradient(
+                stops: [
+                    .init(color: Color.white, location: 0.00),
+                    .init(color: Color.white, location: 0.74),
+                    .init(color: Color.white.opacity(0.55), location: 0.89),
+                    .init(color: Color.clear, location: 1.00)
+                ],
+                center: .center, startRadius: 0, endRadius: CGFloat(span * 0.5)
+            )
+        )
+    }
+}
+
+/// The shockwave: a bright annulus that expands out of the break.
+struct ShockSprite: View {
+    var body: some View {
+        Circle()
+            .fill(
+                RadialGradient(
+                    stops: [
+                        .init(color: Color.white.opacity(0.00), location: 0.00),
+                        .init(color: Color.white.opacity(0.04), location: 0.58),
+                        .init(color: Color.white.opacity(0.50), location: 0.80),
+                        .init(color: Color.white.opacity(0.95), location: 0.90),
+                        .init(color: Color.white.opacity(0.28), location: 0.96),
+                        .init(color: Color.clear, location: 1.00)
+                    ],
+                    center: .center, startRadius: 0, endRadius: 32
+                )
+            )
+            .frame(width: 64, height: 64)
+    }
+}
+
+/// The break flash — huge, soft, blown out.
+struct FlashSprite: View {
+    var body: some View {
+        Circle()
+            .fill(
+                RadialGradient(
+                    stops: [
+                        .init(color: Color.white.opacity(0.92), location: 0.00),
+                        .init(color: Color.white.opacity(0.34), location: 0.16),
+                        .init(color: Color(red: 1.0, green: 0.94, blue: 0.84).opacity(0.12), location: 0.38),
+                        .init(color: Color(red: 1.0, green: 0.90, blue: 0.76).opacity(0.03), location: 0.66),
+                        .init(color: Color.clear, location: 1.00)
+                    ],
+                    center: .center, startRadius: 0, endRadius: 80
+                )
+            )
+            .frame(width: 160, height: 160)
+    }
+}
+
+/// All symbols resolved once per frame, so the hot loop is pure blitting.
+struct ResolvedDeck {
+    var halo: [GraphicsContext.ResolvedSymbol] = []
+    var core: [GraphicsContext.ResolvedSymbol] = []
+    var silverHalo: GraphicsContext.ResolvedSymbol
+    var silverCore: GraphicsContext.ResolvedSymbol
+    var smoke: [GraphicsContext.ResolvedSymbol] = []
+    var flash: GraphicsContext.ResolvedSymbol
+    var starWarm: GraphicsContext.ResolvedSymbol
+    var starCool: GraphicsContext.ResolvedSymbol
+    var glint: GraphicsContext.ResolvedSymbol
+    var shock: GraphicsContext.ResolvedSymbol
+
+    init?(_ ctx: GraphicsContext) {
+        guard let sh = ctx.resolveSymbol(id: Sprites.silverHaloID),
+              let sc = ctx.resolveSymbol(id: Sprites.silverCoreID),
+              let fl = ctx.resolveSymbol(id: Sprites.flashID),
+              let sw = ctx.resolveSymbol(id: Sprites.starWarmID),
+              let sl = ctx.resolveSymbol(id: Sprites.starCoolID),
+              let gl = ctx.resolveSymbol(id: Sprites.glintID),
+              let sk = ctx.resolveSymbol(id: Sprites.shockID) else { return nil }
+        silverHalo = sh; silverCore = sc; flash = fl
+        starWarm = sw; starCool = sl; glint = gl; shock = sk
+        smoke.reserveCapacity(Sprites.smokeVariants)
+        for i in 0..<Sprites.smokeVariants {
+            guard let sm = ctx.resolveSymbol(id: Sprites.smokeID(i)) else { return nil }
+            smoke.append(sm)
+        }
+        halo.reserveCapacity(Sprites.hueCount)
+        core.reserveCapacity(Sprites.hueCount)
+        for i in 0..<Sprites.hueCount {
+            guard let h = ctx.resolveSymbol(id: Sprites.haloID(i)),
+                  let c = ctx.resolveSymbol(id: Sprites.coreID(i)) else { return nil }
+            halo.append(h); core.append(c)
+        }
+    }
+}
+
+// =====================================================================
+// MARK: - Controls
+// =====================================================================
+
+struct ControlDeck: View {
+
+    @Binding var intensity: Double
+    @Binding var scrubbing: Bool
+    @Binding var soundOn: Bool
+
+    var body: some View {
+        VStack(spacing: 13) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Text(Show.name(for: intensity))
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .tracking(3.6)
+                    .foregroundStyle(Color.white.opacity(0.92))
+                    .contentTransition(.opacity)
+                Spacer(minLength: 8)
+                Text(Show.rateText(for: intensity))
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundStyle(Color.white.opacity(0.42))
+                Button {
+                    soundOn.toggle()
+                } label: {
+                    Image(systemName: soundOn ? "speaker.wave.2.fill" : "speaker.slash.fill")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Color.white.opacity(soundOn ? 0.88 : 0.32))
+                        .frame(width: 30, height: 24)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            IntensityTrack(value: $intensity, editing: $scrubbing)
+                .frame(height: 30)
+        }
+        .padding(.horizontal, 22)
+        .padding(.vertical, 16)
+        .frame(maxWidth: 540)
+        .glassPanel()
+        .padding(.horizontal, 20)
+        .padding(.bottom, 18)
+        .animation(.easeInOut(duration: 0.25), value: Show.name(for: intensity))
+    }
+}
+
+struct IntensityTrack: View {
+
+    @Binding var value: Double
+    @Binding var editing: Bool
+
+    private let knob: CGFloat = 26
+
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width
+            let travel = max(1, w - knob)
+            let x = travel * CGFloat(clamp01(value))
+            let glow = Show.glow(for: value)
+
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.white.opacity(0.10))
+                    .frame(height: 7)
+
+                Capsule()
+                    .fill(LinearGradient(colors: Show.trackColors,
+                                         startPoint: .leading, endPoint: .trailing))
+                    .frame(width: x + knob / 2, height: 7)
+                    .shadow(color: glow.opacity(0.55), radius: 9)
+
+                Circle()
+                    .fill(Color.white)
+                    .overlay(Circle().stroke(Color.white.opacity(0.85), lineWidth: 0.75))
+                    .frame(width: knob, height: knob)
+                    .shadow(color: glow.opacity(0.95), radius: editing ? 20 : 13)
+                    .scaleEffect(editing ? 1.12 : 1.0)
+                    .offset(x: x)
+            }
+            .frame(width: w, height: geo.size.height)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { g in
+                        if !editing { editing = true }
+                        value = clamp01(Double((g.location.x - knob / 2) / travel))
+                    }
+                    .onEnded { _ in editing = false }
+            )
+            .animation(.spring(response: 0.28, dampingFraction: 0.7), value: editing)
+        }
+    }
+}
+
+extension View {
+    /// Liquid Glass on iOS 26, material everywhere else.
+    @ViewBuilder func glassPanel() -> some View {
+        if #available(iOS 26.0, *) {
+            self.glassEffect(.regular, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
+        } else {
+            self.background(
+                RoundedRectangle(cornerRadius: 26, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 26, style: .continuous)
+                            .stroke(Color.white.opacity(0.12), lineWidth: 0.5)
+                    )
+            )
+        }
+    }
+}
+
+// =====================================================================
+// MARK: - Show cadence (shared by the engine and the readout)
+// =====================================================================
+
+enum Show {
+
+    /// Seconds between volleys for a normalised energy `e`.
+    static func interval(_ e: Double) -> Double { 4.6 * pow(1 - e, 2.2) + 0.28 }
+
+    /// Average shells per volley.
+    static func volley(_ e: Double) -> Double { 1 + 2.2 * e * e }
+
+    /// Slider position → normalised energy.
+    static func energy(_ intensity: Double) -> Double { pow(clamp01(intensity), 0.85) }
+
+    static func name(for v: Double) -> String {
+        if v <= 0.02 { return "DARK" }
+        if v < 0.12 { return "EMBER" }
+        if v < 0.28 { return "DRIFT" }
+        if v < 0.46 { return "RISE" }
+        if v < 0.64 { return "SWELL" }
+        if v < 0.80 { return "BARRAGE" }
+        if v < 0.93 { return "STORM" }
+        return "FINALE"
+    }
+
+    static func rateText(for v: Double) -> String {
+        guard v > 0.02 else { return "—" }
+        let e = energy(v)
+        let perMinute = Int((60.0 / interval(e)) * volley(e))
+        return "\(perMinute) shells / min"
+    }
+
+    static func glow(for v: Double) -> Color {
+        Color(hue: 0.60 - 0.52 * clamp01(v), saturation: 0.85, brightness: 1.0)
+    }
+
+    static var trackColors: [Color] {
+        [Color(red: 0.20, green: 0.42, blue: 1.00),
+         Color(red: 0.62, green: 0.34, blue: 1.00),
+         Color(red: 1.00, green: 0.30, blue: 0.62),
+         Color(red: 1.00, green: 0.58, blue: 0.18),
+         Color(red: 1.00, green: 0.92, blue: 0.66)]
+    }
+}
+
+@inline(__always) func clamp01(_ v: Double) -> Double { v < 0 ? 0 : (v > 1 ? 1 : v) }
+
+// =====================================================================
+// MARK: - Fast deterministic RNG (xorshift128+)
+// =====================================================================
+
+struct FastRNG {
+    private var s0: UInt64
+    private var s1: UInt64
+
+    init(seed: UInt64) {
+        s0 = (seed &* 0xBF58476D1CE4E5B9) | 1
+        s1 = (seed &* 0x94D049BB133111EB) | 1
+    }
+
+    @inline(__always) mutating func next() -> UInt64 {
+        var x = s0
+        let y = s1
+        s0 = y
+        x ^= x << 23
+        x ^= x >> 17
+        x ^= y
+        x ^= y >> 26
+        s1 = x
+        return s0 &+ s1
+    }
+
+    /// Uniform in [0, 1).
+    @inline(__always) mutating func unit() -> Double {
+        Double(next() >> 11) * (1.0 / 9007199254740992.0)
+    }
+    @inline(__always) mutating func d(_ a: Double, _ b: Double) -> Double { a + (b - a) * unit() }
+    @inline(__always) mutating func i(_ a: Int, _ b: Int) -> Int {
+        if b <= a { return a }
+        return a + Int(next() % UInt64(b - a + 1))
+    }
+    @inline(__always) mutating func chance(_ p: Double) -> Bool { unit() < p }
+    /// ±1 with equal odds.
+    @inline(__always) mutating func sign() -> Double { unit() < 0.5 ? -1 : 1 }
+}
+
+// =====================================================================
+// MARK: - Small 3D helper (shells are generated in 3D, projected to 2.5D)
+// =====================================================================
+
+struct V3 {
+    var x: Double, y: Double, z: Double
+}
+
+@inline(__always) func cross(_ a: V3, _ b: V3) -> V3 {
+    V3(x: a.y * b.z - a.z * b.y,
+       y: a.z * b.x - a.x * b.z,
+       z: a.x * b.y - a.y * b.x)
+}
+
+@inline(__always) func normalized(_ a: V3) -> V3 {
+    let m = max(1e-9, (a.x * a.x + a.y * a.y + a.z * a.z).squareRoot())
+    return V3(x: a.x / m, y: a.y / m, z: a.z / m)
+}
+
+/// Shortest-path hue interpolation (hues live on a circle).
+@inline(__always) func hueLerp(_ a: Double, _ b: Double, _ t: Double) -> Double {
+    var d = b - a
+    if d > 0.5 { d -= 1 } else if d < -0.5 { d += 1 }
+    let h = a + d * t
+    return h - floor(h)
+}
+
+// =====================================================================
+// MARK: - Figures
+//
+// A pattern shell is just a list of points that become star directions.
+// Parts can be flagged as detail (eyes, mouth, whiskers) so they burn in a
+// second colour. Coordinates run about -1...1 with y pointing down, the
+// same way the screen does.
+// =====================================================================
+
+struct Outline {
+    var pts: [(Double, Double)] = []
+    var detail: [Bool] = []
+
+    mutating func reserve(_ n: Int) {
+        pts.reserveCapacity(n + 24)
+        detail.reserveCapacity(n + 24)
+    }
+
+    mutating func add(_ x: Double, _ y: Double, _ d: Bool) {
+        pts.append((x, y))
+        detail.append(d)
+    }
+
+    mutating func arc(_ cx: Double, _ cy: Double, _ r: Double,
+                      _ a0: Double, _ a1: Double, _ n: Int, _ d: Bool = false) {
+        let c = max(2, n)
+        for i in 0..<c {
+            let a = a0 + (a1 - a0) * Double(i) / Double(c)
+            add(cx + cos(a) * r, cy + sin(a) * r, d)
+        }
+    }
+
+    mutating func ring(_ cx: Double, _ cy: Double, _ r: Double, _ n: Int, _ d: Bool = false) {
+        arc(cx, cy, r, 0, 6.2831853, n, d)
+    }
+
+    mutating func line(_ x0: Double, _ y0: Double, _ x1: Double, _ y1: Double,
+                       _ n: Int, _ d: Bool = false) {
+        let c = max(2, n)
+        for i in 0..<c {
+            let f = Double(i) / Double(c - 1)
+            add(x0 + (x1 - x0) * f, y0 + (y1 - y0) * f, d)
+        }
+    }
+
+    /// Ellipse, optionally rotated — toes and muzzles are not circles.
+    mutating func ellipse(_ cx: Double, _ cy: Double, _ rx: Double, _ ry: Double,
+                          _ rot: Double, _ n: Int, _ d: Bool = false) {
+        let c = max(3, n)
+        let cr = cos(rot), sr = sin(rot)
+        for i in 0..<c {
+            let a = Double(i) / Double(c) * 6.2831853
+            let ex = cos(a) * rx
+            let ey = sin(a) * ry
+            add(cx + ex * cr - ey * sr, cy + ex * sr + ey * cr, d)
+        }
+    }
+
+    static func part(_ n: Int, _ f: Double) -> Int { max(2, Int(Double(n) * f)) }
+
+    // MARK: the figures
+
+    static func heart(_ o: inout Outline, _ n: Int) {
+        let c = max(12, n)
+        for i in 0..<c {
+            let t = Double(i) / Double(c) * 6.2831853
+            let s = sin(t)
+            let px = 16 * s * s * s
+            let py = 13 * cos(t) - 5 * cos(2 * t) - 2 * cos(3 * t) - cos(4 * t)
+            o.add(px / 17.0, -py / 17.0, false)
+        }
+    }
+
+    static func star5(_ o: inout Outline, _ n: Int) {
+        var v: [(Double, Double)] = []
+        for i in 0..<10 {
+            let a = -Double.pi / 2 + Double(i) * Double.pi / 5
+            let r = (i % 2 == 0) ? 1.0 : 0.42
+            v.append((r * cos(a), r * sin(a)))
+        }
+        let c = max(12, n)
+        for i in 0..<c {
+            let u = Double(i) / Double(c) * 10
+            let e = Int(u) % 10
+            let f = u - floor(u)
+            let a = v[e], b = v[(e + 1) % 10]
+            o.add(a.0 + (b.0 - a.0) * f, a.1 + (b.1 - a.1) * f, false)
+        }
+    }
+
+    static func flower(_ o: inout Outline, _ n: Int, petals: Int) {
+        let p = Double(petals)
+        let c = max(12, n)
+        for i in 0..<c {
+            let t = Double(i) / Double(c) * 6.2831853
+            let r = 0.55 + 0.45 * cos(p * t)
+            o.add(r * cos(t), r * sin(t), false)
+        }
+    }
+
+    static func cat(_ o: inout Outline, _ n: Int) {
+        o.ring(0, 0.06, 0.70, part(n, 0.40))
+        let ear = part(n, 0.055)
+        o.line(-0.62, -0.32, -0.50, -0.98, ear)
+        o.line(-0.50, -0.98, -0.14, -0.62, ear)
+        o.line( 0.62, -0.32,  0.50, -0.98, ear)
+        o.line( 0.50, -0.98,  0.14, -0.62, ear)
+        o.ring(-0.28, -0.06, 0.085, part(n, 0.035), true)
+        o.ring( 0.28, -0.06, 0.085, part(n, 0.035), true)
+        o.ring( 0.00,  0.16, 0.065, part(n, 0.030), true)
+        let w = part(n, 0.035)
+        o.line(-0.18, 0.20, -0.92, 0.06, w, true)
+        o.line(-0.18, 0.24, -0.92, 0.30, w, true)
+        o.line(-0.18, 0.28, -0.88, 0.52, w, true)
+        o.line( 0.18, 0.20,  0.92, 0.06, w, true)
+        o.line( 0.18, 0.24,  0.92, 0.30, w, true)
+        o.line( 0.18, 0.28,  0.88, 0.52, w, true)
+    }
+
+    static func smiley(_ o: inout Outline, _ n: Int) {
+        o.ring(0, 0, 0.88, part(n, 0.52))
+        o.ring(-0.32, -0.26, 0.10, part(n, 0.06), true)
+        o.ring( 0.32, -0.26, 0.10, part(n, 0.06), true)
+        // y points down, so this arc sweeps under the face: a smile.
+        o.arc(0, -0.06, 0.55, 0.42, 2.72, part(n, 0.30), true)
+    }
+
+    /// Four lobes and a shaft. Each lobe runs from where the shaft meets it,
+    /// right around the outside, to the waist — so the ends are genuinely
+    /// round rather than two arcs with a gap between them. The pair at each
+    /// end are joined by a shallow concave waist, which is the detail that
+    /// makes an end read as an end instead of a bowtie.
+    static func bone(_ o: inout Outline, _ n: Int) {
+        let p = Double.pi
+        let r = 0.215
+        let lobe = part(n, 0.140)
+        o.arc(-0.755, -0.315, r,  0.028 * p, -1.278 * p, lobe)
+        o.arc(-0.755,  0.315, r, -0.028 * p,  1.278 * p, lobe)
+        o.arc( 0.755, -0.315, r,  0.972 * p,  2.278 * p, lobe)
+        o.arc( 0.755,  0.315, r, -0.972 * p, -2.278 * p, lobe)
+        // The waist: an arc of a much larger circle, bulging inward.
+        let waist = part(n, 0.048)
+        o.arc(-1.370, 0, 0.500, -0.0972 * p, 0.0972 * p, waist)
+        o.arc( 1.370, 0, 0.500,  0.9028 * p, 1.0972 * p, waist)
+        let bar = part(n, 0.172)
+        o.line(-0.541, -0.296, 0.541, -0.296, bar)
+        o.line(-0.541,  0.296, 0.541,  0.296, bar)
+    }
+
+    /// Dog paw: four toes over a rounded-triangle pad.
+    static func paw(_ o: inout Outline, _ n: Int) {
+        let c = part(n, 0.38)
+        for i in 0..<c {
+            let t = Double(i) / Double(c) * 6.2831853
+            let rr = 0.60 * (1 + 0.26 * cos(3 * (t + Double.pi / 2)))
+            o.add(rr * cos(t), 0.36 + rr * sin(t) * 0.72, false)
+        }
+        o.ellipse(-0.31, -0.62, 0.210, 0.270,  0.00, part(n, 0.15), true)
+        o.ellipse( 0.31, -0.62, 0.210, 0.270,  0.00, part(n, 0.15), true)
+        o.ellipse(-0.74, -0.30, 0.185, 0.235, -0.38, part(n, 0.13), true)
+        o.ellipse( 0.74, -0.30, 0.185, 0.235,  0.38, part(n, 0.13), true)
+    }
+
+    /// Bear: round head, round ears, and a face.
+    static func bear(_ o: inout Outline, _ n: Int) {
+        o.ellipse(-0.72, -0.86, 0.243, 0.243, 0, part(n, 0.105))
+        o.ellipse( 0.72, -0.86, 0.243, 0.243, 0, part(n, 0.105))
+        o.ellipse( 0.00,  0.00, 1.000, 0.818, 0, part(n, 0.37))
+        o.ellipse( 0.00,  0.377, 0.433, 0.182, 0, part(n, 0.19), true)
+        o.ellipse( 0.00,  0.344, 0.150, 0.069, 0, part(n, 0.10), true)
+        o.ellipse(-0.365, 0.053, 0.090, 0.090, 0, part(n, 0.055), true)
+        o.ellipse( 0.365, 0.053, 0.090, 0.090, 0, part(n, 0.055), true)
+    }
+
+    static func peace(_ o: inout Outline, _ n: Int) {
+        o.ring(0, 0, 0.92, part(n, 0.46))
+        o.line(0, -0.92, 0, 0.92, part(n, 0.20))
+        o.line(0,  0.04, -0.64, 0.68, part(n, 0.17))
+        o.line(0,  0.04,  0.64, 0.68, part(n, 0.17))
+    }
+
+    /// Stick figure, arms thrown up.
+    static func person(_ o: inout Outline, _ n: Int) {
+        o.ring(0, -0.68, 0.19, part(n, 0.16))
+        o.line(0, -0.49, 0,  0.22, part(n, 0.16))
+        o.line(0, -0.32, -0.60, -0.84, part(n, 0.14))
+        o.line(0, -0.32,  0.60, -0.84, part(n, 0.14))
+        o.line(0,  0.22, -0.46, 0.94, part(n, 0.20))
+        o.line(0,  0.22,  0.46, 0.94, part(n, 0.20))
+    }
+}
+
+// =====================================================================
+// MARK: - Simulation model
+// =====================================================================
+
+struct PFlags: OptionSet {
+    let rawValue: UInt16
+    static let twinkle = PFlags(rawValue: 1 << 0)   // gentle shimmer
+    static let glitter = PFlags(rawValue: 1 << 1)   // hard on/off strobe
+    static let ember   = PFlags(rawValue: 1 << 2)   // colour falls to orange as it dies
+    static let silver  = PFlags(rawValue: 1 << 3)   // white/silver star
+    static let jitter  = PFlags(rawValue: 1 << 4)   // crackling, darting motion
+    static let noHalo  = PFlags(rawValue: 1 << 5)   // core only (cheap, for dense fills)
+}
+
+/// A single burning star. Positions/velocities are in world units; `z` is the
+/// projection depth and `fs` the 3D foreshortening of this particular star.
+struct Particle {
+    var x: Double = 0, y: Double = 0
+    var vx: Double = 0, vy: Double = 0
+    var z: Double = 1          // projection depth of the parent shell
+    var fs: Double = 1         // size/brightness scale from the 3rd dimension
+    var age: Double = 0
+    var life: Double = 1
+    var size: Double = 2       // world radius
+    var hue: Double = 0.1
+    var bright: Double = 1
+    var drag: Double = 1.0
+    var grav: Double = 1
+    var buoy: Double = 0.30    // hot stars resist sinking while they burn
+    var windK: Double = 1
+    var decay: Double = 1.7    // brightness falloff exponent
+    var phase: Double = 0
+    var rate: Double = 14
+    var splitAge: Double = -1  // crossette break
+    var splitSpeed: Double = 0
+    var splitHue: Double = -1
+    var splitsLeft: UInt8 = 0  // further breaks after this one
+    var splitGap: Double = 0.45
+    var splitFan: UInt8 = 4
+    var hue2: Double = -1      // colour it burns through to
+    var hueShiftAt: Double = -1
+    var jitter: Double = 0
+    var shed: Double = 0       // sparks per second dropped along the path
+    var shedAccum: Double = 0
+    var trail: UInt8 = 0
+    var flags: PFlags = []
+}
+
+struct Rocket {
+    var x: Double = 0, y: Double = 0
+    var vx: Double = 0, vy: Double = 0
+    var z: Double = 1
+    var fuse: Double = 1
+    var hue: Double = 0.09
+    var silver: Bool = false
+    var size: Double = 3
+    var trailAccum: Double = 0
+    var trailRate: Double = 110
+    var apex: Bool = true
+    var plan = ShellPlan()
+}
+
+/// Powder smoke. It outlives everything else in the show by two orders of
+/// magnitude — a puff hangs for a minute or more, spreading and thinning,
+/// which is how a real show ends up under a lid of its own smog.
+struct Puff {
+    var x: Double = 0, y: Double = 0
+    var vx: Double = 0, vy: Double = 0
+    var z: Double = 1
+    var age: Double = 0
+    var life: Double = 90
+    var r0: Double = 20
+    var grow: Double = 90
+    var density: Double = 0.08
+    var lit: Double = 0          // caught by a nearby break, decays fast
+    var aspect: Double = 1       // drawn as an ellipse, for variety
+    var phase: Double = 0
+    var variant: UInt8 = 0
+}
+
+struct Flash {
+    var x: Double = 0, y: Double = 0
+    var z: Double = 1
+    var age: Double = 0
+    var life: Double = 0.26
+    var radius: Double = 100
+    var hue: Double = 0.1
+    var silver: Bool = false
+    var power: Double = 1
+    var spin: Double = 0        // rotation of the sparkle rosette
+}
+
+struct Star {
+    var ux: Double = 0, uy: Double = 0   // 0...1 screen space
+    var bright: Double = 0.4
+    var size: Double = 1.6
+    var rate: Double = 1.2
+    var phase: Double = 0
+    var parallax: Double = 0.05          // how far this layer slides with the camera
+    var tint: UInt8 = 0                  // 0 silver, 1 warm, 2 cool
+    var glint: Bool = false
+}
+
+// =====================================================================
+// MARK: - Shells
+// =====================================================================
+
+enum ShellType: UInt8 {
+    case peony          // clean sphere of stars
+    case chrysanthemum  // sphere with trails, fading to ember
+    case willow         // long, slow, drooping gold
+    case palm           // a few fat trunks
+    case ring           // a circle in a randomly tilted plane
+    case doubleRing     // two perpendicular rings
+    case crossette      // stars that break into four
+    case strobe         // a shimmering, twinkling ball
+    case crackle        // sphere plus a crackling pistil
+    case salute         // huge flash, few very fast stars
+    case shape          // heart / star outline
+    case spiral         // rotating arms
+    case multiBreak     // splits into several secondary shells
+    case comet          // heavy horsetail
+    case cascade        // stars that break, and break, and break again
+    case brocade        // long gold rays that glitter the whole way out
+}
+
+struct Palette {
+    var h0: Double = 0.09
+    var h1: Double = 0.55
+    var h2: Double = 0.80
+    var n: Int = 1
+    var jitter: Double = 0.012
+    var silverMix: Double = 0
+    var rainbow: Bool = false
+
+    func hue(_ r: inout FastRNG) -> Double {
+        if rainbow { return r.unit() }
+        let pick = n <= 1 ? 0 : r.i(0, n - 1)
+        let base = pick == 0 ? h0 : (pick == 1 ? h1 : h2)
+        let h = base + r.d(-jitter, jitter)
+        return h - floor(h)
+    }
+
+    func isSilver(_ r: inout FastRNG) -> Bool { silverMix > 0 && r.unit() < silverMix }
+
+    /// Hues that actually look like fireworks (no muddy olive / khaki).
+    static let nice: [Double] = [0.005, 0.030, 0.060, 0.090, 0.120, 0.155,
+                                 0.290, 0.340, 0.430, 0.490, 0.530, 0.570,
+                                 0.620, 0.690, 0.760, 0.820, 0.880, 0.930, 0.965]
+
+    static func niceHue(_ r: inout FastRNG) -> Double { nice[r.i(0, nice.count - 1)] }
+
+    static func random(_ r: inout FastRNG) -> Palette {
+        var p = Palette()
+        switch r.i(0, 10) {
+        case 0:                                     // single saturated colour
+            p.h0 = niceHue(&r); p.n = 1; p.jitter = 0.010
+            p.silverMix = r.chance(0.35) ? 0.16 : 0
+        case 1:                                     // complementary pair
+            let a = niceHue(&r)
+            p.h0 = a; p.h1 = (a + 0.5).truncatingRemainder(dividingBy: 1)
+            p.n = 2; p.jitter = 0.018
+        case 2:                                     // analogous
+            let a = niceHue(&r)
+            p.h0 = a; p.h1 = a + 0.06; p.h2 = a - 0.06
+            p.n = 3; p.jitter = 0.014
+        case 3:                                     // triad
+            let a = niceHue(&r)
+            p.h0 = a; p.h1 = a + 1.0 / 3.0; p.h2 = a + 2.0 / 3.0
+            p.n = 3; p.jitter = 0.016
+        case 4:                                     // gold & silver
+            p.h0 = 0.105; p.n = 1; p.jitter = 0.030; p.silverMix = 0.45
+        case 5:                                     // full rainbow
+            p.rainbow = true
+        case 6:                                     // ice
+            p.h0 = 0.560; p.h1 = 0.490; p.n = 2; p.jitter = 0.020; p.silverMix = 0.50
+        case 7:                                     // fire
+            p.h0 = 0.010; p.h1 = 0.060; p.h2 = 0.110; p.n = 3; p.jitter = 0.020
+        case 8:                                     // magenta & cyan
+            p.h0 = 0.905; p.h1 = 0.500; p.n = 2; p.jitter = 0.016
+        case 9:                                     // pure silver salute
+            p.h0 = 0.58; p.n = 1; p.jitter = 0.02; p.silverMix = 1.0
+        default:                                    // violet & lime
+            p.h0 = 0.760; p.h1 = 0.300; p.n = 2; p.jitter = 0.020
+        }
+        return p
+    }
+}
+
+struct ShellPlan {
+    var type: ShellType = .peony
+    var palette = Palette()
+    var z: Double = 1
+    var radius: Double = 120
+    var count: Int = 120
+    var life: Double = 2.0
+    var pistil: Bool = false
+    var pistilHue: Double = 0.1
+    var twinkle: Bool = false
+    var glitter: Bool = false
+    var trail: Bool = false
+    var ember: Bool = false
+    var crackle: Bool = false
+    var shedRate: Double = 0     // glittering trail, sparks per second per star
+    var colorShift: Bool = false
+    var shiftHue: Double = 0
+    var shiftAt: Double = 0.45   // fraction of life
+    var power: Double = 1        // flash / exposure strength
+    var generation: Int = 0      // multi-break depth
+}
+
+// =====================================================================
+// MARK: - Engine
+// =====================================================================
+
+final class FireworksEngine {
+
+    /// 0 = dark, 1 = full finale. Written every frame by the view.
+    var intensity: Double = 0.32
+
+    let audio = AudioDirector()
+    var soundEnabled: Bool = true {
+        didSet { if oldValue != soundEnabled { audio.enabled = soundEnabled } }
+    }
+
+    func prepareAudio() {
+        audio.prepare()
+        audio.enabled = soundEnabled
+    }
+
+    // Live objects
+    private var particles = ContiguousArray<Particle>()
+    private var rockets = ContiguousArray<Rocket>()
+    private var puffs = ContiguousArray<Puff>()
+    private var flashes = ContiguousArray<Flash>()
+    private var stars: [Star] = []
+
+    // Timing
+    private var lastStamp: TimeInterval = -1
+    private var time: Double = 0
+    private var dtEMA: Double = 1.0 / 60.0
+    private var quality: Double = 1.0
+
+    // Geometry (world units are screen points at z == 1)
+    private var canvas: CGSize = .zero
+    private var unitH: Double = 1000
+    private var unitW: Double = 1000
+    private var vanishX: Double = 500
+    private var vanishY: Double = 600
+    private var groundY: Double = 300
+
+    // Camera
+    private var camX: Double = 0
+    private var camY: Double = 0
+    private var dragX: Double = 0
+    private var dragY: Double = 0
+    private var dragging = false
+    private var driftPhase: Double = 0
+
+    // Show state
+    private var nextLaunch: Double = 0.35
+    private var exposure: Double = 0
+    private var wind: Double = 0
+    private var manualTaps: [CGPoint] = []
+
+    private var rng = FastRNG(seed: UInt64(Date().timeIntervalSince1970 * 997) ^ 0x5DEECE66D)
+
+    /// Scale: one world unit is one screen point at z == 1, and an average
+    /// shell's burst radius (0.176·H) stands in for about 45 m of real sky.
+    /// That puts 1 m at 0.0039·H, so an honest 9.8 m/s² lands right here.
+    /// Stars leave the break at ~70 m/s and sag about half a burst radius
+    /// over their life, which is what real fireworks do.
+    private var gravity: Double { unitH * 0.0383 }
+
+    /// Mortars are the one cheat. At true scale a 200 m climb takes six
+    /// seconds, which is a long time to stare at a dot, so the rising comet
+    /// gets its own heavier gravity and arcs over in about two. The sparks
+    /// it sheds fall at the honest rate, which is the part you actually read.
+    private var liftGravity: Double { unitH * 0.30 }
+
+    /// Quadratic drag coefficient for an ordinary star, fixed by its ~20 m/s
+    /// terminal fall. Per-particle `drag` is a multiplier on this: below 1 is
+    /// a heavy star that sinks faster, above 1 a light one that hangs.
+    private var dragUnit: Double { 6.30 / unitH }
+
+    /// The speed a star must leave the break at to open the shell out to
+    /// `radius` in `shapeTime` seconds against that drag. Falls out at about
+    /// 70 m/s for a normal peony, which is what real stars do.
+    private func burstSpeed(_ radius: Double, _ dragMul: Double, _ shapeTime: Double = 1.25) -> Double {
+        let k = dragUnit * dragMul
+        return (exp(min(3.6, k * radius)) - 1) / (k * max(0.2, shapeTime))
+    }
+
+    private var maxParticles: Int { Int(5200 * quality) }
+
+    /// Smoke is fill-rate, not particle count: a few hundred big translucent
+    /// quads is the whole budget, so the cap scales with measured frame time
+    /// and old puffs — the faintest — are the ones that go.
+    private var maxPuffs: Int { Int(60 + 200 * quality * quality) }
+
+    // -----------------------------------------------------------------
+    // MARK: Frame
+    // -----------------------------------------------------------------
+
+    func advance(to date: Date, size: CGSize) {
+        configure(size)
+
+        let stamp = date.timeIntervalSinceReferenceDate
+        if lastStamp < 0 { lastStamp = stamp - 1.0 / 60.0 }
+        var raw = stamp - lastStamp
+        lastStamp = stamp
+        if raw <= 0 { raw = 1.0 / 120.0 }
+        raw = min(raw, 1.0 / 20.0)          // never let a stall teleport the show
+
+        dtEMA += (raw - dtEMA) * 0.08
+        adaptQuality()
+
+        // The slider nudges the clock too: a finale should *feel* faster.
+        let dt = raw * (0.92 + clamp01(intensity) * 0.28)
+        time += dt
+
+        // Air speed, not a shove. Roughly 1 m/s of drift — a still night.
+        wind = unitH * 0.0026 * sin(time * 0.048) + unitH * 0.0013 * sin(time * 0.021 + 1.7)
+
+        stepCamera(dt)
+        stepSpawning()
+        stepRockets(dt)
+        stepParticles(dt)
+        stepDecor(dt)
+        enforceBudget()
+        audio.tick(time)
+    }
+
+    private func configure(_ s: CGSize) {
+        guard s.width > 1, s.height > 1 else { return }
+        guard abs(s.width - canvas.width) > 0.5 || abs(s.height - canvas.height) > 0.5 else { return }
+        canvas = s
+        unitH = Double(s.height)
+        unitW = Double(s.width)
+        vanishX = unitW * 0.5
+        vanishY = unitH * 0.60          // horizon / vanishing line
+        // Camera height above the water. It is small on purpose: the show is
+        // fired from barges out across the water, so their line sits just
+        // under the horizon and the whole foreground is open water. With the
+        // camera up high instead, the water plane at the shells' distance
+        // lands on the bottom edge of the frame and there is nowhere for a
+        // reflection to go.
+        groundY = unitH * 0.055
+        buildStars()
+    }
+
+    private func adaptQuality() {
+        if dtEMA > 1.0 / 47.0 {
+            quality = max(0.36, quality - 0.012)
+        } else if dtEMA < 1.0 / 58.0 {
+            quality = min(1.0, quality + 0.004)
+        }
+    }
+
+    /// Seven discrete sky layers. Each one has its own parallax rate, size and
+    /// brightness band, so panning separates them instead of sliding one flat
+    /// sheet of dots. Deep layers are dense, dim and nearly fixed; the near
+    /// ones are sparse, big and slide noticeably.
+    private func buildStars() {
+        stars.removeAll(keepingCapacity: true)
+        var r = FastRNG(seed: 0xF00D_BEEF)
+        // Stars stop at the waterline. Below it is lake, not sky.
+        let skyBottom = vanishY / max(1, unitH)
+        // Same count over a shorter band would thicken the sky, so scale it
+        // back to hold the density it had when the field ran the full frame.
+        let densityHold = (skyBottom + 0.09) / 1.10
+        let layers = 7
+        for l in 0..<layers {
+            let f = Double(l) / Double(layers - 1)          // 0 = deepest, 1 = nearest
+            let parallax = 0.015 + 0.235 * pow(f, 1.7)
+            let count = Int((215 - 160 * f) * densityHold)  // deep layers are dense dust
+            let sizeLo = 0.70 + 1.10 * f                    // 1.4 px across at the back
+            let sizeHi = 1.15 + 2.35 * f                    // 7.0 px across at the front
+            let brightLo = 0.05 + 0.11 * f
+            let brightHi = 0.17 + 0.33 * f
+            for _ in 0..<count {
+                var st = Star()
+                st.ux = r.unit()
+                // A little past the top edge and a little past the waterline,
+                // so a vertical camera drift never exposes a bare band.
+                st.uy = r.d(-0.05, skyBottom + 0.04)
+                st.parallax = parallax
+                st.size = r.d(sizeLo, sizeHi)
+                st.bright = r.d(brightLo, brightHi)
+                // A slow sine each, 7 to 30 seconds a cycle, all out of step.
+                st.rate = r.d(0.21, 0.95)
+                st.phase = r.d(0, 6.283)
+                // Sparkles are rarer, and live mostly on the near layers.
+                st.glint = r.chance(0.07 + 0.20 * f)
+                if st.glint { st.size *= 1.15; st.bright = min(1, st.bright * 1.25) }
+                st.tint = r.chance(0.62) ? 0 : (r.chance(0.5) ? 1 : 2)
+                stars.append(st)
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // MARK: Camera — the parallax rig
+    // -----------------------------------------------------------------
+
+    func setDrag(dx: Double, dy: Double) {
+        dragging = true
+        dragX = -dx * 0.55
+        dragY = -dy * 0.28
+    }
+
+    func endDrag() { dragging = false }
+
+    func requestManualShell(at point: CGPoint) {
+        if manualTaps.count < 6 { manualTaps.append(point) }
+    }
+
+    private func stepCamera(_ dt: Double) {
+        driftPhase += dt
+        let drift = sin(driftPhase * 0.061) * unitH * 0.075
+                  + sin(driftPhase * 0.131 + 1.2) * unitH * 0.026
+        let driftY = sin(driftPhase * 0.047 + 0.4) * unitH * 0.012
+
+        if !dragging {
+            let decay = exp(-dt * 0.85)
+            dragX *= decay
+            dragY *= decay
+        }
+
+        let k = 1 - exp(-dt * 5.0)
+        camX += ((drift + dragX) - camX) * k
+        camY += ((driftY + dragY) - camY) * k
+    }
+
+    @inline(__always) private func screenX(_ wx: Double, _ z: Double) -> Double {
+        vanishX + (wx - camX) * z
+    }
+    @inline(__always) private func screenY(_ wy: Double, _ z: Double) -> Double {
+        vanishY + (wy - camY) * z
+    }
+    @inline(__always) private func worldX(_ sx: Double, _ z: Double) -> Double {
+        camX + (sx - vanishX) / z
+    }
+    @inline(__always) private func worldY(_ sy: Double, _ z: Double) -> Double {
+        camY + (sy - vanishY) / z
+    }
+
+    // In the pinhole rig z is focal/distance, so distance falls off as 1/z.
+    // Calibrated so a mid-depth shell sits roughly 250 m out — which is why
+    // you see it well before you hear it.
+    private func soundDelay(_ z: Double) -> Double {
+        min(2.4, (250.0 / max(0.20, z)) / 343.0)
+    }
+    private func soundLevel(_ z: Double) -> Double {
+        0.45 + 0.55 * clamp01((z - 0.70) / 0.62)
+    }
+    /// Air eats the top end over distance: far shells are all thud, no crack.
+    private func soundCutoff(_ z: Double) -> Double {
+        1800 + 5200 * clamp01((z - 0.72) / 0.60)
+    }
+    private func soundPan(_ sx: Double) -> Double {
+        max(-1, min(1, ((sx / max(1, unitW)) * 2 - 1) * 0.8))
+    }
+
+    /// Screen height of the water surface at a given depth. At the horizon
+    /// this converges on the vanishing line; nearer shells sit lower.
+    @inline(__always) private func waterLine(_ z: Double) -> Double {
+        vanishY + (groundY - camY) * z
+    }
+
+    /// Distant shells are hazier and dimmer.
+    @inline(__always) private func atmosphere(_ z: Double) -> Double {
+        0.80 + 0.24 * clamp01((z - 0.72) / 0.60)
+    }
+
+    // -----------------------------------------------------------------
+    // MARK: Cadence
+    // -----------------------------------------------------------------
+
+    private func stepSpawning() {
+        while let tap = manualTaps.popLast() {
+            launchShell(e: max(0.35, Show.energy(intensity)), target: tap)
+        }
+
+        guard intensity > 0.02 else { return }
+        guard time >= nextLaunch else { return }
+
+        let e = Show.energy(intensity)
+        let volley = 1 + rng.i(0, Int((2.4 * e * e).rounded()))
+        for _ in 0..<volley { launchShell(e: e, target: nil) }
+
+        // Finale salvos: a wall of shells straight across the sky.
+        if e > 0.84 && rng.chance(0.12) {
+            let n = rng.i(4, 9)
+            for _ in 0..<n { launchShell(e: e, target: nil) }
+        }
+
+        nextLaunch = time + Show.interval(e) * rng.d(0.70, 1.35)
+    }
+
+    /// Depth pick. High energy pushes more shells to the near planes so the
+    /// finale fills the frame; low energy favours calm, distant singles.
+    /// Depth spans a modest 0.72...1.32. Shells still layer and parallax
+    /// against each other, but they all read as being fired from the same
+    /// field rather than one at your feet and the next on the horizon.
+    private func pickDepth(_ e: Double) -> Double {
+        let u = rng.unit()
+        let near = 0.30 + 0.45 * e
+        if rng.unit() < near { return 1.02 + u * 0.30 }         // 1.02 ... 1.32
+        return 0.72 + u * 0.30                                  // 0.72 ... 1.02
+    }
+
+    private func launchShell(e: Double, target: CGPoint?) {
+        guard rockets.count < 80 else { return }
+
+        let z: Double
+        let burstSX: Double
+        var rawSY: Double
+
+        if let t = target {
+            z = rng.d(0.85, 1.25)
+            burstSX = Double(t.x)
+            rawSY = Double(t.y)
+        } else {
+            z = pickDepth(e)
+            burstSX = unitW * rng.d(0.06, 0.94)
+            // Far shells sit nearer the horizon, near shells climb high.
+            rawSY = unitH * rng.d(0.08, 0.31) + unitH * 0.07 * (1 - clamp01((z - 0.72) / 0.60))
+        }
+        rawSY = min(rawSY, vanishY - unitH * 0.04)
+        let burstSY = rawSY
+
+        let bx = worldX(burstSX, z)
+        let by = worldY(burstSY, z)
+
+        // Launch point on the ground plane, roughly under the break.
+        let originSX = burstSX + unitW * rng.d(-0.06, 0.06)
+        let ox = worldX(originSX, z)
+        let oy = groundY
+
+        // Fuse chosen so the shell breaks exactly at apex.
+        let rise = max(unitH * 0.08, oy - by)
+        var fuse = (2 * rise / liftGravity).squareRoot()
+        fuse *= rng.d(0.95, 1.03)
+
+        var plan = makePlan(e: e, z: z)
+        plan.z = z
+
+        var rk = Rocket()
+        rk.x = ox
+        rk.y = oy
+        rk.vy = -liftGravity * fuse
+        rk.vx = (bx - ox) / max(0.2, fuse)
+        rk.z = z
+        rk.fuse = fuse
+        rk.hue = plan.palette.hue(&rng)
+        rk.silver = rng.chance(0.45)
+        rk.size = unitH * 0.0040
+        rk.trailRate = rng.d(70, 130)
+        rk.plan = plan
+        rockets.append(rk)
+
+        // Mortars leave their own bank of smoke sitting on the water.
+        if quality > 0.45 && puffs.count < maxPuffs && rng.chance(0.85) {
+            var s = Puff()
+            s.x = ox + rng.d(-1, 1) * unitH * 0.010
+            s.y = oy - unitH * 0.012
+            s.vy = -unitH * 0.014
+            s.z = z
+            s.life = rng.d(60, 150)
+            s.r0 = unitH * rng.d(0.012, 0.024)
+            s.grow = unitH * rng.d(0.10, 0.19)
+            s.density = rng.d(0.035, 0.075)
+            s.aspect = rng.d(0.90, 1.55)
+            s.phase = rng.d(0, 6.283)
+            s.variant = UInt8(rng.i(0, Sprites.smokeVariants - 1))
+            s.lit = 0.8
+            puffs.append(s)
+        }
+
+        // The boof. At full tilt these stack into mush, so thin them out.
+        if rng.chance(1.0 - 0.55 * e) {
+            audio.schedule(.launch, delay: soundDelay(z),
+                           volume: 0.40 * soundLevel(z),
+                           pan: soundPan(originSX),
+                           cutoff: soundCutoff(z) * 0.8)
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // MARK: Shell design — every shell is rolled fresh
+    // -----------------------------------------------------------------
+
+    private func pickType(_ e: Double) -> ShellType {
+        let table: [(ShellType, Double)] = [
+            (.peony,          1.00),
+            (.chrysanthemum,  0.95),
+            (.willow,         0.70 - 0.25 * e),
+            (.palm,           0.45),
+            (.ring,           0.50),
+            (.doubleRing,     0.24),
+            (.crossette,      0.32 + 0.28 * e),
+            (.strobe,         0.42),
+            (.crackle,        0.28 + 0.40 * e),
+            (.salute,         0.04 + 0.42 * e),
+            (.shape,          0.70 - 0.22 * e),
+            (.spiral,         0.22),
+            (.multiBreak,     0.08 + 0.40 * e),
+            (.comet,          0.26),
+            (.cascade,        0.26 + 0.12 * e),
+            (.brocade,        0.85)
+        ]
+        var total = 0.0
+        for item in table { total += max(0, item.1) }
+        var roll = rng.d(0, total)
+        for item in table {
+            roll -= max(0, item.1)
+            if roll <= 0 { return item.0 }
+        }
+        return .peony
+    }
+
+    private func makePlan(e: Double, z: Double) -> ShellPlan {
+        var p = ShellPlan()
+        p.type = pickType(e)
+        p.palette = Palette.random(&rng)
+
+        let scale = rng.d(0.80, 1.30)
+        p.radius = unitH * 0.176 * scale
+        p.life = rng.d(1.7, 2.5) * (0.85 + 0.35 * scale)
+        p.count = Int(rng.d(105, 200) * scale)
+        p.twinkle = rng.chance(0.34)
+        p.glitter = rng.chance(0.18)
+        p.trail = rng.chance(0.40)
+        p.ember = rng.chance(0.55)
+        p.crackle = rng.chance(0.22)
+        p.pistil = rng.chance(0.30)
+        p.pistilHue = Palette.niceHue(&rng)
+        p.power = 0.55 * scale
+
+        switch p.type {
+        case .peony:
+            p.trail = rng.chance(0.25)
+        case .chrysanthemum:
+            p.trail = true; p.ember = true
+            p.life *= 1.35; p.count = Int(Double(p.count) * 1.05)
+        case .willow:
+            p.trail = true; p.ember = true
+            p.palette = Palette(h0: 0.095, h1: 0.115, h2: 0.075, n: 3,
+                                jitter: 0.02, silverMix: rng.chance(0.3) ? 0.3 : 0.0, rainbow: false)
+            p.life = rng.d(3.8, 5.4)
+            p.radius *= 0.72
+            p.count = Int(Double(p.count) * 0.85)
+            p.twinkle = rng.chance(0.5)
+        case .palm:
+            p.trail = true; p.ember = true
+            p.count = Int(Double(p.count) * 0.75)
+            p.life *= 1.25
+            p.power = 0.8 * scale
+        case .ring, .doubleRing:
+            p.count = Int(Double(p.count) * 0.60)
+            p.trail = rng.chance(0.35)
+            p.life *= 1.1
+        case .crossette:
+            p.count = Int(Double(p.count) * 0.22)
+            p.trail = true
+            p.life *= 0.75
+        case .strobe:
+            p.glitter = true; p.twinkle = false; p.trail = false; p.ember = false
+            p.life = rng.d(2.6, 3.8)
+            p.count = Int(Double(p.count) * 1.1)
+        case .crackle:
+            p.crackle = true; p.pistil = true
+        case .salute:
+            p.count = Int(Double(p.count) * 0.35)
+            p.life = rng.d(0.55, 0.95)
+            p.radius *= 1.15
+            p.power = 2.4 * scale
+            p.palette.silverMix = max(p.palette.silverMix, 0.7)
+            p.trail = false
+        case .shape:
+            // A figure needs enough stars to join up, and a single colour to
+            // read as a drawn line rather than confetti.
+            p.count = Int(Double(p.count) * 1.15)
+            p.radius *= 1.12
+            p.life *= 1.15
+            p.trail = false
+            p.ember = false
+            p.glitter = false
+            p.pistil = false
+            p.crackle = false
+            p.twinkle = rng.chance(0.35)
+            p.palette.n = 1
+            p.palette.rainbow = false
+            p.palette.jitter = 0.008
+            p.palette.silverMix = 0
+            // Eyes, mouth and whiskers burn in a contrasting colour.
+            p.pistilHue = (p.palette.h0 + rng.d(0.34, 0.66)).truncatingRemainder(dividingBy: 1)
+        case .spiral:
+            p.count = Int(Double(p.count) * 0.7)
+            p.trail = true
+        case .multiBreak:
+            p.count = Int(Double(p.count) * 0.35)
+            p.radius *= 0.75
+        case .comet:
+            p.trail = true; p.ember = true
+            p.count = Int(Double(p.count) * 0.8)
+            p.radius *= 0.85
+            p.life *= 1.4
+        case .brocade:
+            // The classic glittering gold shell: long straight rays that
+            // shed sparks the whole way out and hang there burning.
+            p.palette = Palette(h0: 0.095, h1: 0.072, h2: 0.115, n: 3,
+                                jitter: 0.016,
+                                silverMix: rng.chance(0.40) ? 0.22 : 0.0,
+                                rainbow: false)
+            p.count = Int(Double(p.count) * 0.42)
+            p.life = rng.d(2.7, 3.7)
+            p.radius *= 1.05
+            p.trail = true
+            p.ember = true
+            p.glitter = false
+            p.twinkle = rng.chance(0.30)
+            p.crackle = false
+            p.pistil = rng.chance(0.32)
+            p.shedRate = rng.d(26, 42)
+        case .cascade:
+            // Each star ends up as 27, so start with very few.
+            p.count = Int(Double(p.count) * 0.13)
+            p.radius *= 0.85
+            p.life = rng.d(2.7, 3.5)
+            p.trail = true
+            p.ember = false
+            p.pistil = false
+        }
+
+        // Any other long-burning shell may glitter too. Sparks are not free,
+        // so a shell that sheds carries fewer stars.
+        if p.shedRate <= 0 && rng.chance(0.32)
+            && (p.type == .chrysanthemum || p.type == .willow
+                || p.type == .palm || p.type == .comet) {
+            p.shedRate = rng.d(15, 27)
+            p.count = Int(Double(p.count) * 0.70)
+            p.ember = true
+        }
+
+        // Colour-changing stars. Not for figures, which need one colour to
+        // stay legible, nor salutes, which are over before they could.
+        if p.type != .shape && p.type != .salute && rng.chance(0.22) {
+            p.colorShift = true
+            p.shiftHue = (p.palette.h0 + rng.d(0.28, 0.72)).truncatingRemainder(dividingBy: 1)
+            p.shiftAt = rng.d(0.34, 0.58)
+            p.ember = false
+        }
+
+        // Density budget: a finale runs many smaller shells, not many huge ones.
+        let density = quality * (1.05 - 0.30 * e)
+        p.count = max(14, Int(Double(p.count) * density))
+        return p
+    }
+
+    // -----------------------------------------------------------------
+    // MARK: Rockets
+    // -----------------------------------------------------------------
+
+    private func stepRockets(_ dt: Double) {
+        guard !rockets.isEmpty else { return }
+        var index = rockets.count - 1
+        while index >= 0 {
+            var r = rockets[index]
+            r.vy += liftGravity * dt
+            r.x += r.vx * dt
+            r.y += r.vy * dt
+            r.fuse -= dt
+
+            // Burning tail.
+            r.trailAccum += r.trailRate * quality * dt
+            while r.trailAccum >= 1 {
+                r.trailAccum -= 1
+                spawnStar(x: r.x + rng.d(-2, 2), y: r.y + rng.d(-2, 2),
+                          vx: r.vx * 0.10 + rng.d(-18, 18),
+                          vy: r.vy * 0.06 + rng.d(-10, 26),
+                          z: r.z, fs: 1,
+                          life: rng.d(0.22, 0.60), size: unitH * 0.0020,
+                          hue: r.silver ? 0.10 : r.hue,
+                          bright: rng.d(0.45, 0.95),
+                          drag: 3.0, grav: 0.35, windK: 1.6, decay: 1.9,
+                          trail: 0,
+                          flags: r.silver ? [.ember, .silver] : [.ember],
+                          buoy: 0.55)
+            }
+
+            if r.fuse <= 0 || (r.apex && r.vy >= 0) {
+                burst(plan: r.plan, x: r.x, y: r.y, vx: r.vx * 0.22, vy: r.vy * 0.22)
+                rockets.remove(at: index)
+            } else {
+                rockets[index] = r
+            }
+            index -= 1
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // MARK: Star factory
+    // -----------------------------------------------------------------
+
+    private func spawnStar(x: Double, y: Double, vx: Double, vy: Double,
+                           z: Double, fs: Double,
+                           life: Double, size: Double, hue: Double, bright: Double,
+                           drag: Double, grav: Double, windK: Double, decay: Double,
+                           trail: UInt8, flags: PFlags,
+                           splitAge: Double = -1, splitSpeed: Double = 0,
+                           splitHue: Double = -1, jitter: Double = 0,
+                           buoy: Double = 0.30,
+                           splitsLeft: UInt8 = 0, splitGap: Double = 0.45,
+                           splitFan: UInt8 = 4,
+                           hue2: Double = -1, hueShiftAt: Double = -1,
+                           shed: Double = 0) {
+        guard particles.count < maxParticles else { return }
+        var p = Particle()
+        p.x = x; p.y = y; p.vx = vx; p.vy = vy
+        p.z = z; p.fs = fs
+        p.life = life; p.size = size; p.hue = hue; p.bright = bright
+        p.drag = drag; p.grav = grav; p.windK = windK; p.decay = decay; p.buoy = buoy
+        p.trail = trail; p.flags = flags
+        p.splitAge = splitAge; p.splitSpeed = splitSpeed; p.splitHue = splitHue
+        p.splitsLeft = splitsLeft; p.splitGap = splitGap; p.splitFan = splitFan
+        p.hue2 = hue2; p.hueShiftAt = hueShiftAt
+        p.shed = shed
+        p.jitter = jitter
+        p.phase = rng.d(0, 6.283)
+        p.rate = rng.d(9, 27)
+        particles.append(p)
+    }
+
+    /// Shared per-star roll used by every burst shape.
+    private func starFlags(_ plan: ShellPlan, silver: Bool) -> PFlags {
+        var f: PFlags = []
+        if silver { f.insert(.silver) }
+        if plan.ember { f.insert(.ember) }
+        if plan.glitter {
+            f.insert(.glitter)
+        } else if plan.twinkle && rng.chance(0.55) {
+            f.insert(.twinkle)
+        }
+        return f
+    }
+
+    // -----------------------------------------------------------------
+    // MARK: The break
+    // -----------------------------------------------------------------
+
+    private func emitStar(_ plan: ShellPlan, x: Double, y: Double, bvx: Double, bvy: Double,
+                          dir: V3, speed: Double, life: Double, size: Double,
+                          drag: Double, grav: Double, decay: Double, trail: UInt8,
+                          extra: PFlags = [], hueOverride: Double = -1,
+                          splitAge: Double = -1, splitSpeed: Double = 0, splitHue: Double = -1,
+                          jitter: Double = 0, brightScale: Double = 1, windK: Double = 1,
+                          buoy: Double = 0.30,
+                          splitsLeft: UInt8 = 0, splitGap: Double = 0.45,
+                          splitFan: UInt8 = 4,
+                          shed: Double = -1) {
+        let silver = plan.palette.isSilver(&rng)
+        var flags = starFlags(plan, silver: silver)
+        flags.formUnion(extra)
+        let hue = hueOverride >= 0 ? hueOverride : plan.palette.hue(&rng)
+        // The third dimension never moves the star on screen — it only changes
+        // how big and how bright it reads. That is the whole 2.5D trick.
+        let fs = 1 + dir.z * 0.30
+        let realLife = life * rng.d(0.84, 1.16)
+        // Colour-changing stars burn through to a second composition partway
+        // down, which is a real trick and a lovely one.
+        var h2 = -1.0
+        var shiftAt = -1.0
+        if plan.colorShift {
+            h2 = plan.shiftHue + rng.d(-0.012, 0.012)
+            shiftAt = realLife * plan.shiftAt * rng.d(0.92, 1.08)
+        }
+        spawnStar(x: x, y: y,
+                  vx: bvx + dir.x * speed,
+                  vy: bvy + dir.y * speed,
+                  z: plan.z, fs: fs,
+                  life: realLife,
+                  size: size,
+                  hue: hue,
+                  bright: rng.d(0.82, 1.12) * brightScale,
+                  drag: drag, grav: grav, windK: windK, decay: decay,
+                  trail: trail, flags: flags,
+                  splitAge: splitAge, splitSpeed: splitSpeed, splitHue: splitHue,
+                  jitter: jitter, buoy: buoy,
+                  splitsLeft: splitsLeft, splitGap: splitGap, splitFan: splitFan,
+                  hue2: h2, hueShiftAt: shiftAt,
+                  shed: shed < 0 ? plan.shedRate : shed)
+    }
+
+    /// How far a star strays from a line it is supposed to be on. Enough that
+    /// a figure reads as drawn rather than plotted; not enough to blur what it
+    /// is. Anything laid out on exact geometry — a figure, a ring, a spiral —
+    /// goes through here, or it looks printed.
+    private static let figureWobble = 0.021
+
+    @inline(__always) private func scatter(_ d: V3) -> V3 {
+        let w = Self.figureWobble
+        return V3(x: d.x + rng.d(-w, w),
+                  y: d.y + rng.d(-w, w),
+                  z: d.z + rng.d(-w * 0.7, w * 0.7))
+    }
+
+    @inline(__always) private func randomDir(_ r: inout FastRNG) -> V3 {
+        let u = r.d(-1, 1)
+        let a = r.d(0, 6.2831853)
+        let s = (max(0, 1 - u * u)).squareRoot()
+        return V3(x: s * cos(a), y: s * sin(a), z: u)
+    }
+
+    private func burst(plan: ShellPlan, x: Double, y: Double, vx: Double, vy: Double) {
+        let baseSize = unitH * 0.0034
+        let atmos = atmosphere(plan.z)
+
+        // Break flash + camera exposure lift.
+        flashes.append(Flash(x: x, y: y, z: plan.z, age: 0,
+                             life: plan.type == .salute ? 0.42 : 0.32,
+                             radius: plan.radius * 0.55,
+                             hue: plan.palette.hue(&rng),
+                             silver: plan.type == .salute,
+                             power: plan.power,
+                             spin: rng.d(0, 6.283)))
+        exposure = min(1.6, exposure + plan.power * 0.22 * atmos)
+
+        // Heard well after it is seen.
+        let delay = soundDelay(plan.z)
+        let level = soundLevel(plan.z)
+        let pan = soundPan(screenX(x, plan.z))
+        let cutoff = soundCutoff(plan.z)
+        let punch = min(1.35, 0.55 + plan.power * 0.45) * (plan.generation > 0 ? 0.55 : 1.0)
+        audio.schedule(plan.type == .salute ? .crack : .boom,
+                       delay: delay, volume: level * punch, pan: pan, cutoff: cutoff)
+        if plan.crackle || plan.type == .crossette || plan.type == .multiBreak {
+            audio.schedule(.crackle, delay: delay + rng.d(0.04, 0.14),
+                           volume: level * 0.55, pan: pan, cutoff: cutoff * 1.1)
+        }
+        if plan.glitter || plan.type == .strobe || (plan.twinkle && rng.chance(0.5)) {
+            audio.schedule(.shimmer, delay: delay + rng.d(0.05, 0.20),
+                           volume: level * 0.42, pan: pan, cutoff: cutoff * 1.2)
+        }
+
+        // Powder smoke. Born inside the flash, so it starts lit.
+        if quality > 0.35 && puffs.count < maxPuffs {
+            let n = plan.type == .salute ? 4 : 3
+            for _ in 0..<n {
+                var s = Puff()
+                s.x = x + rng.d(-1, 1) * plan.radius * 0.30
+                s.y = y + rng.d(-1, 1) * plan.radius * 0.30
+                s.vx = rng.d(-1, 1) * plan.radius * 0.10
+                s.vy = rng.d(-1, 1) * plan.radius * 0.08 - plan.radius * 0.05
+                s.z = plan.z
+                s.life = rng.d(55, 145)
+                s.r0 = plan.radius * rng.d(0.16, 0.28)
+                s.grow = plan.radius * rng.d(0.90, 1.70)
+                s.density = rng.d(0.055, 0.105) * min(1.6, plan.power) * atmos
+                s.aspect = rng.d(0.80, 1.30)
+                s.phase = rng.d(0, 6.283)
+                s.variant = UInt8(rng.i(0, Sprites.smokeVariants - 1))
+                s.lit = 1.1
+                puffs.append(s)
+            }
+        }
+
+        // Smoke already hanging in the air catches the light of this break.
+        // This is most of what sells it: smoke at night is only ever as
+        // visible as whatever happens to be lighting it.
+        if !puffs.isEmpty {
+            let reach = plan.radius * 3.4
+            let reach2 = reach * reach
+            for i in puffs.indices {
+                let dx = puffs[i].x - x
+                let dy = puffs[i].y - y
+                let d2 = dx * dx + dy * dy
+                if d2 > reach2 { continue }
+                let f = 1 - (d2 / reach2).squareRoot()
+                puffs[i].lit = min(2.0, puffs[i].lit + f * f * plan.power * 1.05)
+            }
+        }
+
+        switch plan.type {
+
+        case .peony, .chrysanthemum:
+            let chrys = plan.type == .chrysanthemum
+            let trail: UInt8 = plan.trail ? (chrys ? 3 : 2) : 0
+            let dm = chrys ? 0.88 : 1.0
+            let v = burstSpeed(plan.radius, dm, chrys ? 1.45 : 1.20)
+            for _ in 0..<plan.count {
+                let d = randomDir(&rng)
+                emitStar(plan, x: x, y: y, bvx: vx, bvy: vy, dir: d,
+                         speed: v * rng.d(0.90, 1.06),
+                         life: plan.life, size: baseSize,
+                         drag: dm, grav: 1.0, decay: 1.7, trail: trail)
+            }
+
+        case .willow:
+            let willowV = burstSpeed(plan.radius, 0.50, 1.80)
+            for _ in 0..<plan.count {
+                var d = randomDir(&rng)
+                d.y = d.y * 0.72 + 0.22            // droop
+                emitStar(plan, x: x, y: y, bvx: vx, bvy: vy, dir: d,
+                         speed: willowV * rng.d(0.78, 1.10),
+                         life: plan.life, size: baseSize * 1.25,
+                         drag: 0.50, grav: 1.15, decay: 1.15, trail: 3,
+                         windK: 1.4, buoy: 0.16)
+            }
+
+        case .palm:
+            let palmV = burstSpeed(plan.radius, 0.55, 1.50)
+            let trunks = rng.i(8, 13)
+            for t in 0..<trunks {
+                let a = Double(t) / Double(trunks) * 6.2831853 + rng.d(-0.12, 0.12)
+                let tilt = rng.d(-0.8, 0.8)
+                let per = max(3, plan.count / trunks)
+                for k in 0..<per {
+                    let f = Double(k) / Double(per)
+                    let jitterA = a + rng.d(-0.07, 0.07)
+                    let d = V3(x: cos(jitterA), y: sin(jitterA) * 0.92 - 0.06, z: tilt + rng.d(-0.12, 0.12))
+                    emitStar(plan, x: x, y: y, bvx: vx, bvy: vy, dir: d,
+                             speed: palmV * (0.55 + 0.60 * f),
+                             life: plan.life * (0.7 + 0.6 * f), size: baseSize * 1.35,
+                             drag: 0.55, grav: 1.10, decay: 1.25, trail: 3)
+                }
+            }
+
+        case .ring, .doubleRing:
+            emitRing(plan, x: x, y: y, vx: vx, vy: vy, radius: plan.radius,
+                     count: plan.count, size: baseSize, drag: 1.0)
+            if plan.type == .doubleRing {
+                emitRing(plan, x: x, y: y, vx: vx, vy: vy, radius: plan.radius * 0.92,
+                         count: plan.count, size: baseSize, drag: 1.0)
+            }
+
+        case .crossette:
+            let splitHue = Palette.niceHue(&rng)
+            let crossV = burstSpeed(plan.radius, 0.90, 1.00)
+            let childV = burstSpeed(plan.radius * 0.35, 1.30, 0.55)
+            for _ in 0..<plan.count {
+                let d = randomDir(&rng)
+                emitStar(plan, x: x, y: y, bvx: vx, bvy: vy, dir: d,
+                         speed: crossV * rng.d(0.92, 1.05),
+                         life: plan.life, size: baseSize * 1.15,
+                         drag: 0.90, grav: 0.95, decay: 1.4, trail: 3,
+                         splitAge: rng.d(0.38, 0.60),
+                         splitSpeed: childV,
+                         splitHue: rng.chance(0.6) ? splitHue : -1)
+            }
+
+        case .strobe:
+            let strobeV = burstSpeed(plan.radius, 1.30, 1.20)
+            for _ in 0..<plan.count {
+                let d = randomDir(&rng)
+                emitStar(plan, x: x, y: y, bvx: vx, bvy: vy, dir: d,
+                         speed: strobeV * rng.d(0.88, 1.08),
+                         life: plan.life, size: baseSize * 1.1,
+                         drag: 1.30, grav: 0.90, decay: 0.55, trail: 0,
+                         extra: [.glitter], brightScale: 1.25, buoy: 0.42)
+            }
+
+        case .crackle:
+            let crackV = burstSpeed(plan.radius, 1.0, 1.20)
+            for _ in 0..<plan.count {
+                let d = randomDir(&rng)
+                emitStar(plan, x: x, y: y, bvx: vx, bvy: vy, dir: d,
+                         speed: crackV * rng.d(0.90, 1.06),
+                         life: plan.life, size: baseSize,
+                         drag: 1.0, grav: 1.0, decay: 1.7,
+                         trail: plan.trail ? 2 : 0)
+            }
+
+        case .salute:
+            let saluteV = burstSpeed(plan.radius, 1.20, 0.80)
+            for _ in 0..<plan.count {
+                let d = randomDir(&rng)
+                emitStar(plan, x: x, y: y, bvx: vx, bvy: vy, dir: d,
+                         speed: saluteV * rng.d(0.75, 1.15),
+                         life: plan.life, size: baseSize * 1.1,
+                         drag: 1.20, grav: 0.90, decay: 2.6, trail: 2,
+                         brightScale: 1.4)
+            }
+
+        case .shape:
+            emitOutline(plan, x: x, y: y, vx: vx, vy: vy, size: baseSize)
+
+        case .spiral:
+            let spiralV = burstSpeed(plan.radius, 1.0, 1.25)
+            let arms = rng.i(2, 4)
+            let turns = rng.d(0.55, 1.10)
+            let tilt = rng.d(-0.7, 0.7)
+            let per = max(6, plan.count / arms)
+            for arm in 0..<arms {
+                let a0 = Double(arm) / Double(arms) * 6.2831853
+                for k in 0..<per {
+                    let f = Double(k) / Double(per)
+                    let a = a0 + f * turns * 6.2831853
+                    let d = scatter(V3(x: cos(a), y: sin(a), z: tilt * (1 - f)))
+                    emitStar(plan, x: x, y: y, bvx: vx, bvy: vy, dir: d,
+                             speed: spiralV * (0.25 + 0.85 * f) * rng.d(0.984, 1.016),
+                             life: plan.life * (0.75 + 0.4 * f), size: baseSize,
+                             drag: rng.d(0.955, 1.045),
+                             grav: 0.95 * rng.d(0.94, 1.06), decay: 1.5, trail: 2)
+                }
+            }
+
+        case .multiBreak:
+            let breakV = burstSpeed(plan.radius, 1.20, 0.70)
+            for _ in 0..<plan.count {
+                let d = randomDir(&rng)
+                emitStar(plan, x: x, y: y, bvx: vx, bvy: vy, dir: d,
+                         speed: breakV * rng.d(0.85, 1.05),
+                         life: plan.life * 0.55, size: baseSize * 0.9,
+                         drag: 1.20, grav: 1.0, decay: 2.0, trail: 2)
+            }
+            if plan.generation < 1 && rockets.count < 80 {
+                let subs = rng.i(3, 6)
+                for s in 0..<subs {
+                    var sub = plan
+                    sub.generation = plan.generation + 1
+                    sub.type = rng.chance(0.35) ? .crackle : (rng.chance(0.5) ? .peony : .strobe)
+                    sub.radius = plan.radius * rng.d(0.42, 0.62)
+                    sub.count = max(18, Int(Double(plan.count) * rng.d(0.7, 1.1)))
+                    sub.life = rng.d(1.3, 2.1)
+                    sub.power = plan.power * 0.5
+                    if rng.chance(0.6) { sub.palette = Palette.random(&rng) }
+
+                    let a = Double(s) / Double(subs) * 6.2831853 + rng.d(-0.3, 0.3)
+                    let sp = plan.radius * rng.d(1.5, 2.2)
+                    var rk = Rocket()
+                    rk.x = x; rk.y = y
+                    rk.vx = vx + cos(a) * sp
+                    rk.vy = vy + sin(a) * sp * 0.8 - plan.radius * 0.35
+                    rk.z = plan.z
+                    rk.fuse = rng.d(0.45, 0.85)
+                    rk.hue = sub.palette.hue(&rng)
+                    rk.silver = rng.chance(0.5)
+                    rk.size = unitH * 0.0028
+                    rk.trailRate = 60
+                    rk.apex = false
+                    rk.plan = sub
+                    rockets.append(rk)
+                }
+            }
+
+        case .brocade:
+            // Low drag so the rays run long and straight, and a slow decay so
+            // the head is still burning when it gets there.
+            let brocV = burstSpeed(plan.radius, 0.62, 1.55)
+            for _ in 0..<plan.count {
+                let d = randomDir(&rng)
+                emitStar(plan, x: x, y: y, bvx: vx, bvy: vy, dir: d,
+                         speed: brocV * rng.d(0.92, 1.05),
+                         life: plan.life, size: baseSize * 1.15,
+                         drag: 0.62, grav: 1.02, decay: 0.95, trail: 1,
+                         buoy: 0.22)
+            }
+
+        case .cascade:
+            let cascV = burstSpeed(plan.radius, 0.95, 1.00)
+            let gap = rng.d(0.40, 0.60)
+            let childV = burstSpeed(plan.radius * 0.30, 1.30, 0.50)
+            let childHue = rng.chance(0.70) ? Palette.niceHue(&rng) : -1
+            for _ in 0..<plan.count {
+                let d = randomDir(&rng)
+                emitStar(plan, x: x, y: y, bvx: vx, bvy: vy, dir: d,
+                         speed: cascV * rng.d(0.90, 1.05),
+                         life: plan.life, size: baseSize * 1.20,
+                         drag: 0.95, grav: 0.95, decay: 1.25, trail: 3,
+                         splitAge: gap * rng.d(0.92, 1.08),
+                         splitSpeed: childV,
+                         splitHue: childHue,
+                         splitsLeft: 2, splitGap: gap, splitFan: 3)
+            }
+
+        case .comet:
+            let cometV = burstSpeed(plan.radius, 0.45, 1.90)
+            let a0 = rng.d(0, 6.2831853)
+            for _ in 0..<plan.count {
+                var d = randomDir(&rng)
+                d.y = d.y * 0.55 + 0.35
+                d.x = d.x * 0.85 + cos(a0) * 0.1
+                emitStar(plan, x: x, y: y, bvx: vx, bvy: vy, dir: d,
+                         speed: cometV * rng.d(0.60, 1.15),
+                         life: plan.life, size: baseSize * 1.45,
+                         drag: 0.45, grav: 1.25, decay: 1.0, trail: 3,
+                         windK: 1.5, buoy: 0.14)
+            }
+        }
+
+        // Inner pistil of a contrasting colour.
+        if plan.pistil && plan.type != .salute && plan.type != .multiBreak {
+            var inner = plan
+            inner.palette = Palette(h0: plan.pistilHue, h1: plan.pistilHue, h2: plan.pistilHue,
+                                    n: 1, jitter: 0.02,
+                                    silverMix: rng.chance(0.3) ? 0.3 : 0, rainbow: false)
+            let n = max(10, Int(Double(plan.count) * 0.30))
+            let pistilV = burstSpeed(plan.radius * 0.55, 1.10, 1.00)
+            for _ in 0..<n {
+                let d = randomDir(&rng)
+                emitStar(inner, x: x, y: y, bvx: vx, bvy: vy, dir: d,
+                         speed: pistilV * rng.d(0.85, 1.05),
+                         life: plan.life * 0.8, size: baseSize * 0.95,
+                         drag: 1.10, grav: 1.0, decay: 1.8, trail: 0,
+                         shed: 0)
+            }
+        }
+
+        // Crackling pistil: tiny, short-lived, violently flickering sparks.
+        if plan.crackle {
+            let n = max(14, Int(Double(plan.count) * 0.35 * quality))
+            let sparkV = burstSpeed(plan.radius * 0.45, 2.40, 0.50)
+            for _ in 0..<n {
+                let d = randomDir(&rng)
+                emitStar(plan, x: x, y: y, bvx: vx, bvy: vy, dir: d,
+                         speed: sparkV * rng.d(0.25, 1.00),
+                         life: rng.d(0.35, 0.85), size: baseSize * 0.8,
+                         drag: 2.40, grav: 0.8, decay: 1.0, trail: 0,
+                         extra: [.glitter, .silver, .noHalo],
+                         jitter: unitH * 0.5, brightScale: 1.3, buoy: 0.48,
+                         shed: 0)
+            }
+        }
+    }
+
+    private func emitRing(_ plan: ShellPlan, x: Double, y: Double, vx: Double, vy: Double,
+                          radius: Double, count: Int, size: Double, drag: Double) {
+        // A circle living in a randomly oriented 3D plane: on screen it reads
+        // as an ellipse of any tilt, which is what sells the depth.
+        let nz = rng.d(-1, 1)
+        let na = rng.d(0, 6.2831853)
+        let ns = (max(0, 1 - nz * nz)).squareRoot()
+        let n = V3(x: ns * cos(na), y: ns * sin(na), z: nz)
+        let t = abs(n.z) > 0.9 ? V3(x: 1, y: 0, z: 0) : V3(x: 0, y: 0, z: 1)
+        let e1 = normalized(cross(n, t))
+        let e2 = normalized(cross(n, e1))
+        let phase = rng.d(0, 6.2831853)
+        let trail: UInt8 = plan.trail ? 2 : 0
+        let v = burstSpeed(radius, drag, 1.15)
+
+        for k in 0..<count {
+            let a = Double(k) / Double(count) * 6.2831853 + phase + rng.d(-0.010, 0.010)
+            let ca = cos(a), sa = sin(a)
+            let d = scatter(V3(x: e1.x * ca + e2.x * sa,
+                               y: e1.y * ca + e2.y * sa,
+                               z: e1.z * ca + e2.z * sa))
+            emitStar(plan, x: x, y: y, bvx: vx, bvy: vy, dir: d,
+                     speed: v * rng.d(0.984, 1.016),
+                     life: plan.life, size: size,
+                     drag: drag * rng.d(0.955, 1.045),
+                     grav: rng.d(0.94, 1.06), decay: 1.6, trail: trail)
+        }
+    }
+
+    private func emitOutline(_ plan: ShellPlan, x: Double, y: Double,
+                             vx: Double, vy: Double, size: Double) {
+        let kind = rng.i(0, 9)
+        var o = Outline()
+        o.reserve(plan.count)
+        let n = plan.count
+
+        switch kind {
+        case 0: Outline.heart(&o, n)
+        case 1: Outline.star5(&o, n)
+        case 2: Outline.flower(&o, n, petals: rng.i(4, 7))
+        case 3: Outline.cat(&o, n)
+        case 4: Outline.smiley(&o, n)
+        case 5: Outline.bone(&o, n)
+        case 6: Outline.peace(&o, n)
+        case 7: Outline.person(&o, n)
+        case 8: Outline.bear(&o, n)
+        default: Outline.paw(&o, n)
+        }
+
+        // A figure has an up and a front; a rosette does not. Keep the
+        // recognisable ones close to upright and facing the audience.
+        let figure = kind != 1 && kind != 2
+        let tilt = figure ? rng.d(-0.26, 0.26) : rng.d(-0.55, 0.55)
+        let spin = figure ? rng.d(-0.09, 0.09) : rng.d(-0.35, 0.35)
+        let ct = cos(tilt), st = sin(tilt)
+        let cs = cos(spin), ss = sin(spin)
+
+        let shapeV = burstSpeed(plan.radius, 1.0, 1.30)
+        let detailHue = plan.pistilHue
+
+        // A hand is not a plotter. Every star gets a little scatter off the
+        // line, and each one flies slightly differently — a touch of spread in
+        // how hard the air holds it and how heavy it is — so the figure opens
+        // up a fraction over its life instead of hanging there stamped out.
+        // Tight enough to be unmistakable, loose enough to look real.
+        for i in 0..<o.pts.count {
+            let p = o.pts[i]
+            let rx = p.0 * cs - p.1 * ss
+            let ry = p.0 * ss + p.1 * cs
+            let d = scatter(V3(x: rx * ct, y: ry, z: rx * st))
+            let isDetail = o.detail[i]
+            emitStar(plan, x: x, y: y, bvx: vx, bvy: vy, dir: d,
+                     speed: shapeV * rng.d(0.984, 1.016),
+                     life: plan.life * 1.1, size: size * (isDetail ? 1.15 : 1.05),
+                     drag: rng.d(0.955, 1.045),
+                     grav: 0.85 * rng.d(0.925, 1.075),
+                     decay: 1.5, trail: 0,
+                     hueOverride: isDetail ? detailHue : -1,
+                     brightScale: isDetail ? 1.25 : 1.1)
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // MARK: Integration
+    // -----------------------------------------------------------------
+
+    private func stepParticles(_ dt: Double) {
+        guard !particles.isEmpty else { return }
+
+        let g = gravity
+        let w = wind
+        let dragK = dragUnit
+        // Sparks are not free. As the field fills up, shedding thins out
+        // rather than blowing the budget and starving the shells themselves.
+        // A star that reaches the water goes out. Without this they sink
+        // through the surface and keep burning, which is the single most
+        // obvious tell that the water is painted on.
+        let waterPlane = groundY + unitH * 0.004
+        let load = Double(particles.count) / Double(max(1, maxParticles))
+        let shedScale = quality * max(0, 1 - load * load * 1.15)
+        let spark = unitH * 0.0022
+        var newborn: [Particle] = []
+        var write = 0
+
+        particles.withUnsafeMutableBufferPointer { buf in
+            for read in 0..<buf.count {
+                var p = buf[read]
+                p.age += dt
+                if p.age >= p.life { continue }
+
+                // Crossette: the star breaks into four fresh ones.
+                if p.splitAge > 0 && p.age >= p.splitAge {
+                    let fan = max(2, Int(p.splitFan))
+                    let step = 6.2831853 / Double(fan)
+                    let sp = p.splitSpeed
+                    let base = atan2(p.vy, p.vx)
+                    let remaining = max(0.25, p.life - p.age)
+                    for k in 0..<fan {
+                        var c = p
+                        let a = base + Double(k) * step + rng.d(-0.10, 0.10)
+                        c.vx = p.vx * 0.30 + cos(a) * sp * rng.d(0.85, 1.15)
+                        c.vy = p.vy * 0.30 + sin(a) * sp * rng.d(0.85, 1.15)
+                        c.age = 0
+                        c.life = max(0.32, remaining * rng.d(0.75, 1.15))
+                        c.size = p.size * 0.86
+                        c.drag = 1.30
+                        c.decay = 1.6
+                        c.trail = 2
+                        c.phase = rng.d(0, 6.283)
+                        if p.splitsLeft > 0 {
+                            // Another break is coming; make sure it lives to see it.
+                            c.splitsLeft = p.splitsLeft - 1
+                            c.splitAge = p.splitGap * rng.d(0.88, 1.12)
+                            c.splitSpeed = sp * 0.58
+                            c.life = max(c.life, c.splitAge + 0.30)
+                        } else {
+                            c.splitsLeft = 0
+                            c.splitAge = -1
+                        }
+                        if p.splitHue >= 0 {
+                            c.hue = p.splitHue
+                            c.hue2 = -1
+                            c.hueShiftAt = -1
+                            c.flags.subtract(.silver)
+                        }
+                        newborn.append(c)
+                    }
+                    continue            // parent is consumed by the break
+                }
+
+                if p.jitter > 0 {
+                    p.vx += rng.d(-1, 1) * p.jitter * dt
+                    p.vy += rng.d(-1, 1) * p.jitter * dt
+                }
+
+                // Gravity, less the buoyancy of a star that is still burning.
+                let heat = 1 - p.age / p.life
+                p.vy += g * (p.grav - p.buoy * heat * heat) * dt
+
+                // Quadratic drag, integrated semi-implicitly so it is stable
+                // at any speed. This is the whole reason a shell can stop dead
+                // at its burst radius and still fall like a real object: at
+                // 70 m/s the braking is fierce, at walking pace it is nothing.
+                // Drag acts on motion *through the air*, so a star settles at
+                // the air's own speed instead of being accelerated forever.
+                let air = w * p.windK
+                let rvx = p.vx - air
+                let sp = (rvx * rvx + p.vy * p.vy).squareRoot()
+                if sp > 1e-9 {
+                    let f = 1 / (1 + dragK * p.drag * sp * dt)
+                    p.vx = air + rvx * f
+                    p.vy *= f
+                }
+
+                p.x += p.vx * dt
+                p.y += p.vy * dt
+
+                if p.vy > 0 && p.y > waterPlane { continue }
+
+                // A glittering star drops burning grains the whole way out.
+                // They hang where they fall, so the path itself draws the long
+                // sparkling ray — the trail is made of debris, not of echoes.
+                if p.shed > 0 && shedScale > 0.02 && p.age < p.life * 0.92 {
+                    p.shedAccum += p.shed * shedScale * dt
+                    while p.shedAccum >= 1 {
+                        p.shedAccum -= 1
+                        var k = Particle()
+                        k.x = p.x + rng.d(-1, 1) * spark
+                        k.y = p.y + rng.d(-1, 1) * spark
+                        k.vx = p.vx * 0.10 + rng.d(-1, 1) * spark * 7
+                        k.vy = p.vy * 0.10 + rng.d(-1, 1) * spark * 7
+                        k.z = p.z
+                        k.fs = p.fs * 0.85
+                        k.life = rng.d(0.65, 1.20)
+                        k.size = p.size * 0.46
+                        k.hue = 0.085 + rng.d(-0.020, 0.020)
+                        k.bright = rng.d(0.55, 1.05)
+                        k.drag = 3.4
+                        k.grav = 0.85
+                        k.buoy = 0.55
+                        k.windK = 1.3
+                        k.decay = 1.45
+                        k.phase = rng.d(0, 6.283)
+                        k.rate = rng.d(18, 44)
+                        // A few grains strobe hard; the rest just burn out.
+                        if rng.unit() < 0.30 {
+                            k.flags = [.glitter, .silver]
+                        } else {
+                            k.flags = [.ember]
+                        }
+                        newborn.append(k)
+                    }
+                }
+
+                buf[write] = p
+                write += 1
+            }
+        }
+
+        if write < particles.count { particles.removeLast(particles.count - write) }
+        if !newborn.isEmpty {
+            let room = maxParticles - particles.count
+            if room > 0 {
+                particles.append(contentsOf: newborn.prefix(room))
+            }
+        }
+    }
+
+    private func stepDecor(_ dt: Double) {
+        exposure *= exp(-dt * 6.0)
+        if exposure < 0.0015 { exposure = 0 }
+
+        if !flashes.isEmpty {
+            var i = flashes.count - 1
+            while i >= 0 {
+                flashes[i].age += dt
+                if flashes[i].age >= flashes[i].life { flashes.remove(at: i) }
+                i -= 1
+            }
+        }
+
+        if !puffs.isEmpty {
+            var i = puffs.count - 1
+            while i >= 0 {
+                var s = puffs[i]
+                s.age += dt
+                if s.age >= s.life {
+                    puffs.remove(at: i)
+                } else {
+                    // Hot and rising at first; after that it just goes where
+                    // the air goes, which on a still night is almost nowhere.
+                    s.vy -= gravity * 0.30 * exp(-s.age * 0.35) * dt
+                    s.vx += (wind * 2.4 - s.vx) * (1 - exp(-dt * 0.45))
+                    s.vy *= exp(-dt * 0.30)
+                    // A slow bounded wander, so a cloud never sits dead still.
+                    let wobX = sin(time * 0.23 + s.phase) * unitH * 0.005
+                    let wobY = sin(time * 0.17 + s.phase * 1.7) * unitH * 0.003
+                    s.x += (s.vx + wobX) * dt
+                    s.y += (s.vy + wobY) * dt
+                    s.lit *= exp(-dt * 1.5)
+                    puffs[i] = s
+                }
+                i -= 1
+            }
+        }
+    }
+
+    private func enforceBudget() {
+        let over = particles.count - maxParticles
+        if over > 0 { particles.removeFirst(over) }
+        if puffs.count > maxPuffs { puffs.removeFirst(puffs.count - maxPuffs) }
+        if flashes.count > 48 { flashes.removeFirst(flashes.count - 48) }
+    }
+
+    // -----------------------------------------------------------------
+    // MARK: Render
+    // -----------------------------------------------------------------
+
+    @inline(__always) private func hueIndex(_ h: Double) -> Int {
+        var v = h - floor(h)
+        v *= Double(Sprites.hueCount)
+        var i = Int(v)
+        if i < 0 { i = 0 }
+        if i >= Sprites.hueCount { i = Sprites.hueCount - 1 }
+        return i
+    }
+
+    func render(_ ctx: inout GraphicsContext, size: CGSize) {
+        let w = Double(size.width)
+        let h = Double(size.height)
+
+        ctx.fill(Path(CGRect(origin: .zero, size: size)), with: .color(.black))
+        guard let deck = ResolvedDeck(ctx) else { return }
+
+        // Everything in the sky is light, so everything is additive.
+        ctx.blendMode = .plusLighter
+
+        drawStars(&ctx, deck, w, h)
+        drawWaterSurface(&ctx, w, h)
+        drawPuffs(&ctx, deck, w, h)
+        drawParticles(&ctx, deck, w, h)
+        drawRockets(&ctx, deck, w, h)
+        drawReflections(&ctx, deck, w, h)
+        drawFlashes(&ctx, deck, w, h)
+
+        if exposure > 0.004 {
+            ctx.opacity = 1
+            let a = min(0.085, exposure * 0.055)
+            ctx.fill(Path(CGRect(origin: .zero, size: size)),
+                     with: .color(Color(red: 1.0, green: 0.95, blue: 0.88).opacity(a)))
+        }
+    }
+
+    private func drawStars(_ ctx: inout GraphicsContext, _ deck: ResolvedDeck,
+                           _ w: Double, _ h: Double) {
+        for s in stars {
+            var sx = s.ux * w - camX * s.parallax
+            sx = sx.truncatingRemainder(dividingBy: w)
+            if sx < 0 { sx += w }
+            let sy = s.uy * h - camY * s.parallax
+
+            let osc = sin(time * s.rate + s.phase)
+            // Sparkles wink most of the way out; plain dots breathe.
+            let tw = s.glint ? (0.16 + 0.84 * pow(max(0, osc), 1.4))
+                             : (0.52 + 0.48 * osc)
+            let a = s.bright * tw
+
+            // The field ends at the waterline.
+            if sy > vanishY { continue }
+            if a < 0.02 { continue }
+
+            ctx.opacity = a
+            if s.glint {
+                let g = s.size * 2.7
+                ctx.draw(deck.glint, in: CGRect(x: sx - g, y: sy - g, width: g * 2, height: g * 2))
+            } else {
+                let r = s.size
+                let sym = s.tint == 1 ? deck.starWarm : (s.tint == 2 ? deck.starCool : deck.silverCore)
+                ctx.draw(sym, in: CGRect(x: sx - r, y: sy - r, width: r * 2, height: r * 2))
+            }
+        }
+    }
+
+    private func drawPuffs(_ ctx: inout GraphicsContext, _ deck: ResolvedDeck,
+                           _ w: Double, _ h: Double) {
+        guard !deck.smoke.isEmpty else { return }
+        // Screen radius is capped. A puff that grew without limit would eat
+        // the entire fill-rate budget on its own by the time it faded out.
+        let cap = unitH * 0.16
+        for s in puffs {
+            let f = s.age / s.life
+            let env = min(1, s.age * 0.8) * pow(1 - f, 0.70)
+            let a = s.density * env * (0.34 + s.lit + exposure * 0.30) * atmosphere(s.z)
+            if a < 0.0035 { continue }
+            let rw = min(cap, (s.r0 + s.grow * pow(f, 0.55)) * s.z)
+            let rx = rw * s.aspect
+            let ry = rw / s.aspect
+            let sx = screenX(s.x, s.z)
+            let sy = screenY(s.y, s.z)
+            if sx < -rx * 1.2 || sx > w + rx * 1.2 { continue }
+            if sy < -ry * 1.2 || sy > h + ry * 1.2 { continue }
+            // No single puff is ever allowed to read as solid.
+            ctx.opacity = min(0.55, a)
+            ctx.draw(deck.smoke[Int(s.variant) % deck.smoke.count],
+                     in: CGRect(x: sx - rx, y: sy - ry, width: rx * 2, height: ry * 2))
+        }
+    }
+
+    /// The surface itself. A black rectangle below the horizon is a void, not
+    /// a lake — what makes it read as a plane going away from you is swell
+    /// spaced by perspective: bands crowded at the horizon, opening out as
+    /// they come toward the camera, drifting in at a rate that accelerates
+    /// with the same curve.
+    private func drawWaterSurface(_ ctx: inout GraphicsContext, _ w: Double, _ h: Double) {
+        let waterY = vanishY
+        guard waterY < h - 4 else { return }
+        let span = h - waterY
+
+        // Distant water catching the skyglow. One soft band at the horizon
+        // does more for the sense of distance than anything else here.
+        let glow = min(0.13, 0.018 + exposure * 0.050)
+        ctx.opacity = 1
+        ctx.fill(Path(CGRect(x: 0, y: waterY, width: w, height: span * 0.20)),
+                 with: .linearGradient(
+                    Gradient(stops: [
+                        .init(color: Color(red: 0.40, green: 0.50, blue: 0.70).opacity(glow), location: 0.0),
+                        .init(color: Color(red: 0.30, green: 0.40, blue: 0.62).opacity(glow * 0.25), location: 0.45),
+                        .init(color: Color.clear, location: 1.0)
+                    ]),
+                    startPoint: CGPoint(x: 0, y: waterY),
+                    endPoint: CGPoint(x: 0, y: waterY + span * 0.20)))
+
+        // A wash over the whole surface, so the water lifts when something
+        // big goes off above it.
+        let wash = min(0.09, 0.006 + exposure * 0.050)
+        if wash > 0.003 {
+            ctx.fill(Path(CGRect(x: 0, y: waterY, width: w, height: span)),
+                     with: .linearGradient(
+                        Gradient(colors: [Color(red: 0.26, green: 0.36, blue: 0.58).opacity(wash),
+                                          Color.clear]),
+                        startPoint: CGPoint(x: 0, y: waterY),
+                        endPoint: CGPoint(x: 0, y: h)))
+        }
+
+        // The swell.
+        let bands = quality > 0.62 ? 46 : 26
+        let base = 0.013 + exposure * 0.050
+        for i in 0..<bands {
+            var u = Double(i) / Double(bands) + time * 0.012
+            u -= floor(u)
+            let p = pow(u, 1.9)                       // perspective spacing
+            let y = waterY + span * p
+            if y >= h { continue }
+            let thick = max(0.9, span * (0.004 + 0.030 * p))
+            // fade in off the horizon, and back out underfoot
+            let edge = min(1, p * 9) * (1 - p * 0.55)
+            let shimmer = 0.55 + 0.45 * sin(Double(i) * 2.37 + time * 0.85)
+            let a = base * edge * shimmer
+            if a < 0.0022 { continue }
+            let c = Color(red: 0.44, green: 0.56, blue: 0.78)
+            let ph = Double(i) * 1.7 + time * 0.4
+            ctx.fill(Path(CGRect(x: 0, y: y, width: w, height: thick)),
+                     with: .linearGradient(
+                        Gradient(stops: [
+                            .init(color: c.opacity(a * (0.45 + 0.55 * (0.5 + 0.5 * sin(ph)))), location: 0.0),
+                            .init(color: c.opacity(a * (0.45 + 0.55 * (0.5 + 0.5 * sin(ph + 2.1)))), location: 0.5),
+                            .init(color: c.opacity(a * (0.45 + 0.55 * (0.5 + 0.5 * sin(ph + 4.2)))), location: 1.0)
+                        ]),
+                        startPoint: CGPoint(x: 0, y: y),
+                        endPoint: CGPoint(x: w, y: y)))
+        }
+    }
+
+    /// Everything above the water gets a second, wrecked copy below it.
+    ///
+    /// Reflection is about the water surface *at the object's own depth*, not
+    /// about the horizon — that is what makes a spark falling toward the water
+    /// meet its own reflection at the surface instead of jumping across a
+    /// seam. A true mirror of a shell 150 m up lands far below the frame, so
+    /// the drop is squeezed through a saturating curve: near the surface it is
+    /// close to one-to-one, and high shells pile up together partway down the
+    /// water, which is what a real glitter path does.
+    private func drawReflections(_ ctx: inout GraphicsContext, _ deck: ResolvedDeck,
+                                 _ w: Double, _ h: Double) {
+        guard vanishY < h - 8 else { return }
+        let t = time
+        let knee = unitH * 0.45
+
+        // Returns where a point reflects to, and how far down the water it
+        // lands (0 at the surface, 1 at the near edge of the frame).
+        func mirror(_ sy: Double, _ z: Double) -> (Double, Double)? {
+            let surface = waterLine(z)
+            let above = surface - sy
+            if above <= 0 || surface >= h - 2 { return nil }
+            let room = h - surface
+            let drop = room * above / (above + knee)
+            let ry = surface + drop
+            if ry > h + 40 { return nil }
+            return (ry, min(1, drop / room))
+        }
+
+        // Flashes throw the widest glare, and there are few of them.
+        for fl in flashes {
+            let u = fl.age / fl.life
+            if u >= 1 { continue }
+            guard let (ry, depth) = mirror(screenY(fl.y, fl.z), fl.z) else { continue }
+            let a = pow(1 - u, 1.9) * fl.power * 0.32 * (1 - depth * 0.35)
+            if a < 0.012 { continue }
+            let rr = fl.radius * fl.z * (0.50 + u * 0.80)
+            let hh = rr * (2.2 + depth * 5.4)
+            let rip = sin(ry * 0.050 + t * 1.7) * (1.5 + depth * 20)
+            let sx = screenX(fl.x, fl.z) + rip
+            let tint = fl.silver ? deck.silverHalo : deck.halo[hueIndex(fl.hue)]
+            ctx.opacity = min(1, a)
+            ctx.draw(tint, in: CGRect(x: sx - rr, y: ry - hh, width: rr * 2, height: hh * 2))
+        }
+
+        // Stars, decimated — a reflection is broken up anyway, so drawing
+        // every second or third one costs nothing in believability.
+        let step = quality > 0.78 ? 2 : 3
+        var n = 0
+        for p in particles {
+            n += 1
+            if n % step != 0 { continue }
+            let u = p.age / p.life
+            if u >= 1 { continue }
+
+            var a = p.bright * min(1, p.age * 22) * pow(1 - u, p.decay)
+            if p.flags.contains(.glitter) {
+                a *= sin(t * p.rate + p.phase) > 0.45 ? 1.25 : 0.05
+            }
+            a *= atmosphere(p.z) * p.fs * 0.34
+            if a < 0.025 { continue }
+
+            guard let (ry, depth) = mirror(screenY(p.y, p.z), p.z) else { continue }
+            let fade = a * (1 - depth * 0.45)
+            if fade < 0.02 { continue }
+
+            var hue = p.hue
+            if p.flags.contains(.ember) { hue = hueLerp(hue, 0.060, min(1, pow(u, 1.4))) }
+            let sym = p.flags.contains(.silver) ? deck.silverCore : deck.core[hueIndex(hue)]
+
+            let rip = sin(ry * 0.055 + t * 2.0 + p.phase) * (1.0 + depth * 17)
+            let sx = screenX(p.x, p.z) + rip
+            let rr = p.size * p.z * p.fs * (0.95 + depth * 0.55)
+            let hh = rr * (1.8 + depth * 5.8)
+            ctx.opacity = min(1, fade)
+            ctx.draw(sym, in: CGRect(x: sx - rr, y: ry - hh, width: rr * 2, height: hh * 2))
+        }
+    }
+
+    private func drawParticles(_ ctx: inout GraphicsContext, _ deck: ResolvedDeck,
+                               _ w: Double, _ h: Double) {
+        let t = time
+        let trailBudget = quality > 0.7 ? 3 : (quality > 0.5 ? 2 : 1)
+
+        for p in particles {
+            let u = p.age / p.life
+            if u >= 1 { continue }
+
+            // Fast attack, long tapered decay.
+            var a = p.bright * min(1, p.age * 22) * pow(1 - u, p.decay)
+
+            if p.flags.contains(.glitter) {
+                let s = sin(t * p.rate + p.phase)
+                a *= s > 0.45 ? 1.25 : 0.05
+            } else if p.flags.contains(.twinkle) {
+                a *= 0.48 + 0.52 * sin(t * p.rate + p.phase)
+            }
+
+            a *= atmosphere(p.z) * p.fs
+            if a < 0.012 { continue }
+
+            let sx = screenX(p.x, p.z)
+            let sy = screenY(p.y, p.z)
+            let r = p.size * p.z * p.fs * (1 + u * 0.18)
+            let bound = r * 6
+            if sx < -bound || sx > w + bound || sy < -bound || sy > h + bound { continue }
+
+            let silver = p.flags.contains(.silver)
+            var hue = p.hue
+            if p.hueShiftAt > 0 && p.age > p.hueShiftAt {
+                hue = hueLerp(p.hue, p.hue2, clamp01((p.age - p.hueShiftAt) / 0.22))
+            }
+            if p.flags.contains(.ember) {
+                // Stars cool to orange as they burn out.
+                hue = hueLerp(hue, 0.060, min(1, pow(u, 1.4)))
+            }
+            let idx = hueIndex(hue)
+            let halo = silver ? deck.silverHalo : deck.halo[idx]
+            let core = silver ? deck.silverCore : deck.core[idx]
+
+            // Cheap depth of field: far shells spread into their glow and
+            // lose the hard centre, near ones stay pin-sharp.
+            let soft = 1 + 0.30 * clamp01((1.06 - p.z) / 0.34)
+
+            if !p.flags.contains(.noHalo) {
+                let hr = r * 3.0 * soft
+                ctx.opacity = min(1, a * 0.50)
+                ctx.draw(halo, in: CGRect(x: sx - hr, y: sy - hr, width: hr * 2, height: hr * 2))
+            }
+
+            if a > 0.13 {
+                ctx.opacity = min(1, a * 1.15 / soft)
+                ctx.draw(core, in: CGRect(x: sx - r, y: sy - r, width: r * 2, height: r * 2))
+            }
+
+            // Motion streak: a few echoes back along the velocity vector.
+            if p.trail > 0 && a > 0.10 {
+                let steps = min(Int(p.trail), trailBudget)
+                let vxs = p.vx * p.z
+                let vys = p.vy * p.z
+                for k in 1...steps {
+                    let f = Double(k) * 0.032
+                    let ex = sx - vxs * f
+                    let ey = sy - vys * f
+                    let er = r * (1 - 0.18 * Double(k))
+                    if er <= 0.2 { break }
+                    ctx.opacity = min(1, a * 0.42 / Double(k))
+                    ctx.draw(core, in: CGRect(x: ex - er, y: ey - er, width: er * 2, height: er * 2))
+                }
+            }
+        }
+    }
+
+    private func drawRockets(_ ctx: inout GraphicsContext, _ deck: ResolvedDeck,
+                             _ w: Double, _ h: Double) {
+        for r in rockets {
+            let sx = screenX(r.x, r.z)
+            let sy = screenY(r.y, r.z)
+            if sx < -60 || sx > w + 60 || sy < -60 || sy > h + 60 { continue }
+            let idx = hueIndex(r.hue)
+            let halo = r.silver ? deck.silverHalo : deck.halo[idx]
+            let core = r.silver ? deck.silverCore : deck.core[idx]
+            let rad = r.size * r.z
+            let hr = rad * 4.5
+
+            ctx.opacity = 0.55
+            ctx.draw(halo, in: CGRect(x: sx - hr, y: sy - hr, width: hr * 2, height: hr * 2))
+            ctx.opacity = 1.0
+            ctx.draw(core, in: CGRect(x: sx - rad, y: sy - rad, width: rad * 2, height: rad * 2))
+
+            let vxs = r.vx * r.z, vys = r.vy * r.z
+            for k in 1...3 {
+                let f = Double(k) * 0.022
+                let er = rad * (1 - 0.2 * Double(k))
+                if er <= 0.2 { break }
+                ctx.opacity = 0.5 / Double(k)
+                ctx.draw(core, in: CGRect(x: sx - vxs * f - er, y: sy - vys * f - er,
+                                          width: er * 2, height: er * 2))
+            }
+        }
+    }
+
+    private func drawFlashes(_ ctx: inout GraphicsContext, _ deck: ResolvedDeck,
+                             _ w: Double, _ h: Double) {
+        // Four layers on their own clocks, all sized off the shell: a hard
+        // white core, a four-point flare that is gone almost at once, a soft
+        // coloured bloom, and a shockwave ring riding out ahead of the stars.
+        for f in flashes {
+            let u = f.age / f.life
+            if u >= 1 { continue }
+            let sx = screenX(f.x, f.z)
+            let sy = screenY(f.y, f.z)
+            let R = f.radius * f.z
+            if sx < -R * 5 || sx > w + R * 5 || sy < -R * 5 || sy > h + R * 5 { continue }
+
+            let tint = f.silver ? deck.silverHalo : deck.halo[hueIndex(f.hue)]
+
+            // Bloom — the slowest of the four. Everything here is sized to
+            // stay inside the star front, which only reaches about 0.4 of the
+            // shell radius in the time the flash is alive. Overshoot that and
+            // the break reads as a big empty halo with a small shell in it.
+            let bloomA = pow(1 - u, 1.9) * f.power * 0.72
+            if bloomA > 0.01 {
+                let br = R * (0.12 + u * 0.52)
+                ctx.opacity = min(1, bloomA)
+                ctx.draw(tint, in: CGRect(x: sx - br, y: sy - br, width: br * 2, height: br * 2))
+            }
+
+            // White core — a hot point, not a headlight.
+            let coreA = pow(1 - u, 3.4) * f.power
+            if coreA > 0.01 {
+                let cr = R * (0.030 + u * 0.045)
+                ctx.opacity = min(1, coreA)
+                ctx.draw(deck.flash, in: CGRect(x: sx - cr, y: sy - cr, width: cr * 2, height: cr * 2))
+            }
+
+            // Five small sparkles thrown out radially, rather than one big
+            // lens flare parked on the middle.
+            let flareA = pow(1 - u, 5.0) * f.power * 0.42
+            if flareA > 0.02 {
+                let fr = R * (0.10 + u * 0.13)
+                let ring = R * (0.10 + u * 0.34)
+                ctx.opacity = min(1, flareA)
+                for k in 0..<5 {
+                    let a = f.spin + Double(k) * 1.2566371      // 2pi / 5
+                    let px = sx + cos(a) * ring
+                    let py = sy + sin(a) * ring
+                    ctx.draw(deck.glint, in: CGRect(x: px - fr, y: py - fr,
+                                                    width: fr * 2, height: fr * 2))
+                }
+            }
+
+            // Shockwave.
+            let ringA = pow(1 - u, 1.5) * min(1.0, f.power) * 0.36
+            if ringA > 0.01 {
+                // Grows fast then eases, the same way the stars do.
+                let rr = R * (0.08 + u * u * 0.26 + u * 0.38)
+                ctx.opacity = min(1, ringA)
+                ctx.draw(deck.shock, in: CGRect(x: sx - rr, y: sy - rr, width: rr * 2, height: rr * 2))
+            }
+        }
+    }
+}
+
+// =====================================================================
+// MARK: - Sound
+//
+// Every sound here is synthesised from noise and sine at startup — there
+// are no audio files, because there is no second file to put them in.
+// Five families: the mortar's boof, the shell's break, a sharp salute
+// crack, crackling pistils and a high shimmer for twinkling stars.
+//
+// The good part is the distance model. You see the flash, then you hear
+// it: the delay, the volume and a per-voice low-pass all come off the
+// shell's depth, so far shells thud late and dull while near ones snap.
+// =====================================================================
+
+/// Chamberlin state-variable filter — gives a resonant band without much work.
+struct SVFilter {
+    var low: Double = 0
+    var band: Double = 0
+    var high: Double = 0
+
+    /// `f` is 2·sin(π·fc/sr), `q` is damping — smaller means more resonant,
+    /// and more resonant means more tonal. Keep q up for anything that should
+    /// read as a tick rather than a chime. Stable while f < 2 - q.
+    @inline(__always) mutating func run(_ x: Double, _ f: Double, _ q: Double) {
+        high = x - low - q * band
+        band += f * high
+        low += f * band
+    }
+}
+
+enum SoundKind: Int, CaseIterable {
+    case launch = 0     // mortar thump
+    case boom           // shell break
+    case crack          // salute
+    case crackle        // crackling pistil
+    case shimmer        // glitter / strobe stars
+}
+
+final class AudioDirector {
+
+    static let sampleRate: Double = 44100
+
+    var enabled: Bool = true {
+        didSet { if !enabled { pending.removeAll() } }
+    }
+
+    private let engine = AVAudioEngine()
+    private let submix = AVAudioMixerNode()
+    private let reverb = AVAudioUnitReverb()
+    private var players: [AVAudioPlayerNode] = []
+    private var eqs: [AVAudioUnitEQ] = []
+    private var busyUntil: [Double] = []
+    private var banks: [[AVAudioPCMBuffer]] = []
+    private var started = false
+    private var now: Double = 0
+    private var rng = FastRNG(seed: 0x51ED_2701)
+
+    private struct Pending {
+        var due: Double
+        var kind: SoundKind
+        var volume: Double
+        var pan: Double
+        var cutoff: Double
+    }
+    private var pending: [Pending] = []
+
+    private let voiceCount = 20
+
+    // -----------------------------------------------------------------
+
+    func prepare() {
+        guard !started else { return }
+
+        let session = AVAudioSession.sharedInstance()
+        // .playback so the show is audible with the ring switch off, but
+        // mixWithOthers so we never stop someone's music.
+        try? session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+        try? session.setActive(true)
+
+        // Voices are mono so panning has something to do; everything past the
+        // submix is stereo, or the pan would collapse back to the centre.
+        guard let fmt = AVAudioFormat(standardFormatWithSampleRate: Self.sampleRate, channels: 1),
+              let outFmt = AVAudioFormat(standardFormatWithSampleRate: Self.sampleRate, channels: 2)
+        else { return }
+
+        banks = SoundKind.allCases.map { synthesise($0, format: fmt) }
+
+        engine.attach(submix)
+        engine.attach(reverb)
+        reverb.loadFactoryPreset(.largeHall2)
+        reverb.wetDryMix = 24        // night air, open ground
+        engine.connect(submix, to: reverb, format: outFmt)
+        engine.connect(reverb, to: engine.mainMixerNode, format: outFmt)
+
+        for _ in 0..<voiceCount {
+            let node = AVAudioPlayerNode()
+            let eq = AVAudioUnitEQ(numberOfBands: 1)
+            if let band = eq.bands.first {
+                band.filterType = .lowPass
+                band.frequency = 18000
+                band.bypass = false
+            }
+            engine.attach(node)
+            engine.attach(eq)
+            engine.connect(node, to: eq, format: fmt)
+            engine.connect(eq, to: submix, format: fmt)
+            players.append(node)
+            eqs.append(eq)
+            busyUntil.append(-1)
+        }
+
+        engine.prepare()
+        do {
+            try engine.start()
+        } catch {
+            enabled = false
+            return
+        }
+        for node in players { node.play() }
+        started = true
+    }
+
+    func schedule(_ kind: SoundKind, delay: Double, volume: Double, pan: Double, cutoff: Double) {
+        guard started, enabled, volume > 0.02, pending.count < 120 else { return }
+        pending.append(Pending(due: now + max(0, delay), kind: kind,
+                               volume: volume, pan: pan, cutoff: cutoff))
+    }
+
+    func tick(_ t: Double) {
+        now = t
+        guard started, enabled else { return }
+        guard !pending.isEmpty else { return }
+        var i = pending.count - 1
+        while i >= 0 {
+            if pending[i].due <= t {
+                fire(pending[i])
+                pending.remove(at: i)
+            }
+            i -= 1
+        }
+    }
+
+    private func fire(_ e: Pending) {
+        let bank = banks[e.kind.rawValue]
+        guard !bank.isEmpty else { return }
+
+        var slot = -1
+        var active = 0
+        for i in 0..<players.count {
+            if busyUntil[i] > now { active += 1 } else if slot < 0 { slot = i }
+        }
+        guard slot >= 0 else { return }     // all voices busy; let this one go
+
+        let buf = bank[rng.i(0, bank.count - 1)]
+        // Soft ducking so a finale stays loud without turning to mush.
+        let duck = 1.0 / (1.0 + 0.085 * Double(active))
+        let node = players[slot]
+        node.volume = Float(min(1.0, e.volume * duck))
+        node.pan = Float(max(-1, min(1, e.pan)))
+        if let band = eqs[slot].bands.first {
+            band.frequency = Float(max(220, min(18000, e.cutoff)))
+        }
+        node.scheduleBuffer(buf, at: nil, options: [], completionHandler: nil)
+        busyUntil[slot] = now + Double(buf.frameLength) / Self.sampleRate
+    }
+
+    // -----------------------------------------------------------------
+    // MARK: Synthesis
+    // -----------------------------------------------------------------
+
+    private func synthesise(_ kind: SoundKind, format: AVAudioFormat) -> [AVAudioPCMBuffer] {
+        var samples: [[Float]] = []
+        switch kind {
+        case .launch:
+            samples = [buildLaunch(seed: 11, f0: 74, dur: 0.42),
+                       buildLaunch(seed: 29, f0: 62, dur: 0.46),
+                       buildLaunch(seed: 47, f0: 88, dur: 0.38)]
+        case .boom:
+            samples = [buildBoom(seed: 101, size: 1.35, dur: 1.18, sharp: false),
+                       buildBoom(seed: 137, size: 1.00, dur: 1.08, sharp: false),
+                       buildBoom(seed: 173, size: 0.78, dur: 0.95, sharp: false),
+                       buildBoom(seed: 211, size: 1.15, dur: 1.12, sharp: false)]
+        case .crack:
+            samples = [buildBoom(seed: 307, size: 0.60, dur: 0.85, sharp: true),
+                       buildBoom(seed: 349, size: 0.72, dur: 0.92, sharp: true)]
+        case .crackle:
+            samples = [buildCrackle(seed: 401, dur: 1.15),
+                       buildCrackle(seed: 433, dur: 1.05),
+                       buildCrackle(seed: 467, dur: 1.25)]
+        case .shimmer:
+            samples = [buildShimmer(seed: 503, hz: 3800, dur: 1.50),
+                       buildShimmer(seed: 541, hz: 4600, dur: 1.40),
+                       buildShimmer(seed: 587, hz: 5400, dur: 1.60)]
+        }
+        return samples.compactMap { pcm($0, format: format) }
+    }
+
+    private func pcm(_ data: [Float], format: AVAudioFormat) -> AVAudioPCMBuffer? {
+        guard let buf = AVAudioPCMBuffer(pcmFormat: format,
+                                         frameCapacity: AVAudioFrameCount(data.count)),
+              let ch = buf.floatChannelData else { return nil }
+        buf.frameLength = AVAudioFrameCount(data.count)
+        let dst = ch[0]
+        for i in 0..<data.count { dst[i] = data[i] }
+        return buf
+    }
+
+    /// Non-feedback echo taps — the sky answering back off nothing in particular.
+    private func addTaps(_ buf: inout [Float], _ taps: [(Double, Double)]) {
+        let src = buf
+        for (delay, gain) in taps {
+            let d = Int(delay * Self.sampleRate)
+            if d <= 0 || d >= buf.count { continue }
+            let g = Float(gain)
+            for i in 0..<(buf.count - d) { buf[i + d] += src[i] * g }
+        }
+    }
+
+    /// The mortar: a pitch-dropping thump with a powder chuff over the top.
+    private func buildLaunch(seed: UInt64, f0: Double, dur: Double) -> [Float] {
+        let sr = Self.sampleRate
+        let n = Int(dur * sr)
+        var out = [Float](repeating: 0, count: n)
+        var r = FastRNG(seed: seed)
+        var lpLow = 0.0, lpMid = 0.0, phase = 0.0
+        let aLow = 1 - exp(-2 * Double.pi * 300 / sr)
+        let aMid = 1 - exp(-2 * Double.pi * 1200 / sr)
+        for i in 0..<n {
+            let t = Double(i) / sr
+            let f = f0 * (0.52 + 0.48 * exp(-t * 9))
+            phase += 2 * Double.pi * f / sr
+            let thump = sin(phase) * exp(-t * 7.0)
+            let white = r.d(-1, 1)
+            lpLow += (white - lpLow) * aLow
+            lpMid += (white - lpMid) * aMid
+            let air = lpLow * exp(-t * 10.0) * 1.5
+            let chuff = (lpMid - lpLow) * exp(-t * 24.0) * 0.8
+            var v = thump * 0.95 + air + chuff
+            v *= min(1, t * 800)
+            out[i] = Float(tanh(v * 1.3) * 0.55)
+        }
+        addTaps(&out, [(0.075, 0.22), (0.155, 0.11)])
+        return out
+    }
+
+    /// The break: transient crack, low body, sub thump, long rumble.
+    private func buildBoom(seed: UInt64, size: Double, dur: Double, sharp: Bool) -> [Float] {
+        let sr = Self.sampleRate
+        let n = Int(dur * sr)
+        var out = [Float](repeating: 0, count: n)
+        var r = FastRNG(seed: seed)
+        var lpBody = 0.0, lpTail = 0.0, phase = 0.0
+        var sv = SVFilter()
+        let aBody = 1 - exp(-2 * Double.pi * (200 / size) / sr)
+        let aTail = 1 - exp(-2 * Double.pi * (820 / size) / sr)
+        let fCrack = 2 * sin(Double.pi * (sharp ? 2500 : 1400) / sr)
+        let subHz = 50 / size
+        let crackDecay = sharp ? 85.0 : 44.0
+        let bodyDecay = sharp ? 7.5 : 3.4
+        for i in 0..<n {
+            let t = Double(i) / sr
+            let white = r.d(-1, 1)
+            lpBody += (white - lpBody) * aBody
+            lpTail += (white - lpTail) * aTail
+            sv.run(white, fCrack, 0.35)
+            let crack = sv.band * exp(-t * crackDecay) * (sharp ? 1.6 : 0.85)
+            let body = lpBody * exp(-t * bodyDecay) * 2.8
+            let tail = lpTail * exp(-t * 1.45) * 0.45
+            phase += 2 * Double.pi * (subHz * (0.6 + 0.4 * exp(-t * 4))) / sr
+            let sub = sin(phase) * exp(-t * 4.2) * 0.75
+            var v = crack + body + tail + sub
+            v *= min(1, t * 2200)
+            out[i] = Float(tanh(v) * 0.5)
+        }
+        addTaps(&out, [(0.088, 0.30), (0.171, 0.18), (0.262, 0.10)])
+        return out
+    }
+
+    /// Crackling pistil: a thinning train of tiny resonant pops.
+    private func buildCrackle(seed: UInt64, dur: Double) -> [Float] {
+        let sr = Self.sampleRate
+        let n = Int(dur * sr)
+        var out = [Float](repeating: 0, count: n)
+        var r = FastRNG(seed: seed)
+        let grain = Int(sr * 0.018)
+        var t = 0.015
+        while t < dur {
+            let density = 265 * exp(-t * 1.15)
+            t += r.d(0.35, 1.9) / max(8, density)
+            let start = Int(t * sr)
+            if start + 2 >= n { break }
+            let amp = r.d(0.25, 1.0) * exp(-t * 0.9)
+            let f = min(1.30, 2 * sin(Double.pi * r.d(1500, 5200) / sr))
+            let dec = r.d(260, 620)
+            let bite = r.d(0.30, 0.85)
+            var sv = SVFilter()
+            let len = min(grain, n - start)
+            for j in 0..<len {
+                let tt = Double(j) / sr
+                // Damped wide, so each one snaps rather than pings.
+                sv.run(r.d(-1, 1), f, 0.55)
+                let g = (sv.band + sv.high * bite) * exp(-tt * dec)
+                out[start + j] += Float(g * amp * 0.40)
+            }
+        }
+        addTaps(&out, [(0.095, 0.22), (0.185, 0.12)])
+        return out
+    }
+
+    /// The sparkle of glittering stars: a dense sizzle of tiny sharp pops
+    /// that thins into a string of separate cracks, like a fuse of small
+    /// firecrackers running out.
+    ///
+    /// Deliberately broadband. The first version of this used clean sine
+    /// pings, which is exactly how you build a wind chime — a resonant
+    /// partial with a long ring is a musical note, not a spark. Here every
+    /// grain is noise through a wide, heavily damped filter with some raw
+    /// high end riding along, and it dies in a couple of milliseconds.
+    private func buildShimmer(seed: UInt64, hz: Double, dur: Double) -> [Float] {
+        let sr = Self.sampleRate
+        let n = Int(dur * sr)
+        var out = [Float](repeating: 0, count: n)
+        var r = FastRNG(seed: seed)
+
+        // The pops. Dense enough at the start to merge into a roar, thinning
+        // to countable cracks by the end.
+        let grain = Int(sr * 0.007)
+        var t = 0.008
+        while t < dur {
+            let density = 640 * exp(-t * 1.7)
+            t += r.d(0.25, 2.2) / max(25, density)
+            let start = Int(t * sr)
+            if start + 2 >= n { break }
+            let amp = r.d(0.12, 1.0) * exp(-t * 1.25)
+            let fc = min(9000, r.d(hz * 0.40, hz * 1.55))
+            let f = min(1.30, 2 * sin(Double.pi * fc / sr))
+            let q = r.d(0.42, 0.85)          // wide, so it ticks instead of rings
+            let dec = r.d(450, 1500)         // gone in 1-2 ms
+            let bite = r.d(0.25, 0.70)       // raw high end mixed in
+            var sv = SVFilter()
+            let len = min(grain, n - start)
+            for j in 0..<len {
+                let tt = Double(j) / sr
+                sv.run(r.d(-1, 1), f, q)
+                let g = (sv.band + sv.high * bite) * exp(-tt * dec)
+                out[start + j] += Float(g * amp * 0.34)
+            }
+        }
+
+        // A thin sizzle underneath so the gaps never sound gated or synthetic.
+        var bed = SVFilter()
+        var mod = 0.5
+        let fBed = min(1.30, 2 * sin(Double.pi * min(7000, hz * 0.85) / sr))
+        let aMod = 1 - exp(-2 * Double.pi * 26 / sr)
+        for i in 0..<n {
+            let tt = Double(i) / sr
+            bed.run(r.d(-1, 1), fBed, 0.85)
+            mod += (r.unit() - mod) * aMod
+            let env = min(1, tt * 9) * exp(-tt * 2.4)
+            out[i] += Float(bed.band * env * (0.15 + 0.85 * mod * mod) * 0.13)
+        }
+
+        addTaps(&out, [(0.085, 0.20), (0.163, 0.10)])
+        return out
+    }
+}
